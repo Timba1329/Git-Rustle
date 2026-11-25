@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - Live updates: file watcher for the working tree and refs; "Working changes" row in the graph.
 - Per-branch push/publish and fast-forward; hook output and long error details; commit signing (GPG/SSH)
