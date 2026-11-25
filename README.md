@@ -10,27 +10,36 @@ submodules all behave exactly as they do in a terminal.
 
 ## Features
 
-- **Commit graph** with coloured lanes, branch/tag labels, avatars and relative dates; loads
-  incrementally, so large repositories stay fast.
-- **Search and filter** by message, author, file history and "current branch only".
-- **Commit details:** changed-file list and a diff per file; Ctrl+click a second commit to compare.
-- **Staging:** stage and unstage files, **hunks and single lines**; discard changes; amend;
-  commit message history and `commit.template` support.
-- **Diffs:** syntax highlighting, line numbers, side-by-side view, intra-line highlighting,
-  ignore-whitespace and context-line options.
-- **Branches, tags, stashes, submodules** in the sidebar, with context menus.
+- **Commit graph** with coloured lanes, branch/tag labels and relative dates; loads incrementally, so
+  large repositories stay fast. A **Working changes** row sits on top of HEAD when there are uncommitted changes.
+- **Live:** the view reloads by itself when files or refs change on disk, and a background fetch keeps the
+  push/pull badges per branch current (it never asks for a password).
+- **Search and filter** by message, author, file history and "current branch only"; **search file contents**
+  and browse the **file tree** of the working tree or of any commit, with a syntax-highlighted file viewer.
+- **Several commits at once:** Ctrl/Shift+click to select; squash, cherry-pick, revert or compare them.
+  **Drag** an unpushed commit onto another one to reorder.
+- **Staging:** files, **hunks and single lines**; discard; amend; commit message history and
+  `commit.template`; optional **signing** (GPG or SSH) and "skip hooks"; hook output is shown.
+- **Diffs:** syntax highlighting, line numbers, side-by-side, intra-line highlighting, find in diff,
+  visible whitespace, trailing-whitespace marks, whole-file view, ignore-whitespace and context options,
+  and **image diffs** (side by side, swipe, onion skin).
+- **Conflicts:** banner, a **three-way editor** (ours / base / theirs, per conflict: take either, both,
+  the base or write your own), continue / abort / skip.
+- **Branches, tags, stashes, submodules, worktrees and Git LFS** in the sidebar, with context menus.
+  Per branch: ahead/behind badges, push or publish, fast-forward without checking out.
 - **History editing:** merge, rebase, interactive rebase (reword/squash/fixup/drop/reorder),
   cherry-pick, revert, reset.
-- **Conflicts:** conflict banner, ours/theirs/base view, one-click resolution, continue/abort/skip.
-- **Automatic fetch** in the background (every 5 minutes by default, configurable or off) keeps the
-  push/pull badges per branch current. It never asks for a password: if credentials are needed it
-  fails quietly and marks the Fetch button.
-- **Remotes:** fetch, pull (fast-forward / merge / rebase), push, force push with lease, delete
-  remote branches, push tags; running operations can be **cancelled**.
-- **Authentication prompts** for HTTPS tokens and SSH passphrases (in addition to Git Credential Manager).
-- **Tabs** for several repositories, recent repositories, clone and init; drop a folder on the window to open it.
-- Dark and light theme, adjustable text size, keyboard shortcuts, remembers window position.
+- **Remotes:** fetch, pull (fast-forward / merge / rebase), push, force push with lease, delete remote
+  branches, push tags; running operations can be **cancelled**. A **repository settings** window edits
+  remotes and common git configuration.
+- **Command palette** (Ctrl+K), tabs, recent repositories, clone and init, drag a folder onto the window.
+- Authentication prompts for HTTPS tokens and SSH passphrases (in addition to Git Credential Manager).
+- Dark and light theme, adjustable text size, remembers window position, self-update from GitHub releases.
 - Blame, reflog, open in Explorer / terminal / editor.
+
+![Several commits selected](docs/screenshot-multi.png)
+
+![Three-way conflict editor](docs/screenshot-details.png)
 
 ![Commit window](docs/screenshot-commit.png)
 
@@ -72,6 +81,7 @@ release. Code signing (see `scripts/package.ps1`) would be needed for that.
 
 | Shortcut | Action |
 | --- | --- |
+| `Ctrl+K` | Command palette |
 | `Ctrl+O` | Open a repository |
 | `Ctrl+T` / `Ctrl+W` | New / close tab |
 | `Ctrl+Tab` | Next tab |
@@ -111,11 +121,12 @@ Settings, the recent-repositories list and logs live in `%APPDATA%\Rustle` (`set
 
 ## Known limitations
 
-- Image diffs are not shown (binary files are listed, without a preview).
-- File paths that are not valid UTF-8 can't be staged from the UI.
-- Interactive rebase is limited to the first-parent history of the current branch.
-- The installer script needs [Inno Setup 6](https://jrsoftware.org/isinfo.php) and is not built in CI
-  unless the release workflow runs.
+- Long lines in diffs scroll sideways instead of wrapping.
+- File names that are not valid UTF-8 are preserved on Linux and macOS; on Windows git converts names to UTF-8
+  itself, so the case hardly occurs there.
+- Interactive rebase, squash and reordering work on the first-parent history of the current branch and refuse
+  ranges that contain merge commits.
+- Git LFS features need `git-lfs` to be installed.
 - The updater has only been exercised against a local test server, not against a live GitHub release.
 - Binaries are unsigned unless you provide a certificate (see `scripts/package.ps1`), so Windows
   SmartScreen may warn on first run.
