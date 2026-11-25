@@ -48,6 +48,10 @@ pub struct DiffView {
     rows_unified: Vec<Row>,
     rows_sbs: Vec<Row>,
     max_cols: usize,
+    /// Lines of a removed/added pair that differ only in whitespace.
+    ws_only: HashSet<(usize, usize, usize)>,
+    /// A plain file view: no add/remove colours and a single line number column.
+    pub plain: bool,
 }
 
 static SYN: OnceLock<(SyntaxSet, ThemeSet)> = OnceLock::new();
@@ -132,6 +136,7 @@ impl DiffView {
         let mut sbs = Vec::new();
         let mut nums = Vec::new();
         let mut intra = HashMap::new();
+        let mut ws_only = HashSet::new();
         let mut rows_unified = Vec::new();
         let mut rows_sbs = Vec::new();
         let mut max_cols = 0usize;
@@ -165,6 +170,13 @@ impl DiffView {
                             let (ra, rb) = intra_change(&h.lines[a][1..], &h.lines[b][1..]);
                             intra.insert((fi, hi, a), ra);
                             intra.insert((fi, hi, b), rb);
+                            if h.lines[a][1..]
+                                .split_whitespace()
+                                .eq(h.lines[b][1..].split_whitespace())
+                            {
+                                ws_only.insert((fi, hi, a));
+                                ws_only.insert((fi, hi, b));
+                            }
                         }
                     } else {
                         i += 1;
@@ -190,7 +202,65 @@ impl DiffView {
             rows_unified,
             rows_sbs,
             max_cols,
+            ws_only,
+            plain: false,
         }
+    }
+
+    /// A read-only view of a whole file with syntax highlighting and line numbers.
+    pub fn build_file(path: &str, text: &str, dark: bool) -> Self {
+        let n = text.lines().count();
+        let mut diff =
+            format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,{n} +1,{n} @@\n");
+        for l in text.lines() {
+            diff.push(' ');
+            diff.push_str(l);
+            diff.push('\n');
+        }
+        let mut v = Self::build(path.to_string(), &diff, dark);
+        v.plain = true;
+        v
+    }
+
+    fn row_text(&self, row: Row) -> String {
+        match row {
+            Row::Line(f, h, l) => self.files[f].hunks[h].lines[l]
+                .get(1..)
+                .unwrap_or("")
+                .to_lowercase(),
+            Row::Sbs(f, h, s) => {
+                let r = &self.sbs[f][h][s];
+                let side =
+                    |c: &Option<rustle_core::SbsCell>| c.as_ref().map_or(String::new(), |c| c.text.clone());
+                format!("{} {}", side(&r.left), side(&r.right)).to_lowercase()
+            }
+            Row::File(f) => self.files[f].path().unwrap_or_default().to_lowercase(),
+            Row::Hunk(..) => String::new(),
+        }
+    }
+
+    /// Row indices (in the unified or side-by-side layout) whose text contains `needle`
+    /// (lowercase).
+    pub fn find_rows(&self, needle: &str, side_by_side: bool) -> Vec<usize> {
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let rows = if side_by_side {
+            &self.rows_sbs
+        } else {
+            &self.rows_unified
+        };
+        rows.iter()
+            .enumerate()
+            .filter(|(_, r)| self.row_text(**r).contains(needle))
+            .map(|(i, _)| i)
+            .take(5000)
+            .collect()
+    }
+
+    /// Row of line `line` (1-based) of a plain file view.
+    pub fn file_line_row(line: u32) -> usize {
+        2 + line.saturating_sub(1) as usize
     }
 
     pub fn is_empty(&self) -> bool {
@@ -221,6 +291,27 @@ pub enum DiffAction {
     },
 }
 
+/// Optional extras for [`show`].
+#[derive(Default)]
+pub struct ViewExtras<'a> {
+    /// Lowercase text to highlight.
+    pub find: Option<&'a str>,
+    /// Row of the current match (drawn stronger).
+    pub current_row: Option<usize>,
+    /// Scroll this row into view.
+    pub scroll_to: Option<usize>,
+    /// Show spaces as dots.
+    pub show_ws: bool,
+}
+
+/// Columns of trailing whitespace `(start, end)` in `text`, if any.
+fn trailing_ws(text: &str) -> Option<(usize, usize)> {
+    let t = text.replace('\t', "    ");
+    let kept = t.trim_end().chars().count();
+    let all = t.chars().count();
+    (all > kept).then_some((kept, all))
+}
+
 fn tinted(c: Color32, a: f32) -> Color32 {
     c.gamma_multiply(a)
 }
@@ -229,6 +320,7 @@ struct Style {
     font: FontId,
     char_w: f32,
     row_h: f32,
+    show_ws: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -240,6 +332,7 @@ fn draw_code(
     spans: &LineSpans,
     st: &Style,
     emph: Option<((usize, usize), Color32)>,
+    trail: Option<(usize, usize)>,
 ) {
     if let Some(((a, b), color)) = emph
         && b > a
@@ -250,17 +343,31 @@ fn draw_code(
         );
         p.rect_filled(r, 2.0, color);
     }
+    if let Some((a, b)) = trail {
+        let r = Rect::from_min_max(
+            pos2(x + a as f32 * st.char_w, cy - st.row_h / 2.0 + 1.0),
+            pos2(x + b as f32 * st.char_w, cy + st.row_h / 2.0 - 1.0),
+        );
+        p.rect_filled(r, 2.0, tinted(theme::red(), 0.45));
+    }
+    let dots = |t: &str| -> String {
+        if st.show_ws {
+            t.replace(' ', "·")
+        } else {
+            t.to_string()
+        }
+    };
     let mut job = LayoutJob::default();
     if spans.is_empty() {
         job.append(
-            &plain.replace('\t', "    "),
+            &dots(&plain.replace('\t', "    ")),
             0.0,
             TextFormat::simple(st.font.clone(), theme::text()),
         );
     } else {
         for s in spans {
             job.append(
-                &s.text,
+                &dots(&s.text),
                 0.0,
                 TextFormat::simple(
                     st.font.clone(),
@@ -274,7 +381,7 @@ fn draw_code(
 }
 
 /// Draws the diff. Returns nothing; staging requests are pushed to `acts`.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
     id: &str,
@@ -282,6 +389,7 @@ pub fn show(
     side_by_side: bool,
     sel: &mut HashSet<(usize, usize, usize)>,
     stage: Option<StageCtx>,
+    extras: &ViewExtras<'_>,
     acts: &mut Vec<DiffAction>,
 ) {
     let font = FontId::monospace(13.0);
@@ -294,6 +402,7 @@ pub fn show(
         font,
         char_w,
         row_h: 22.0,
+        show_ws: extras.show_ws,
     };
     let rows = if side_by_side {
         &v.rows_sbs
@@ -316,126 +425,138 @@ pub fn show(
 
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        egui::ScrollArea::both().id_salt(id).auto_shrink(false).show_rows(
-            ui,
-            st.row_h,
-            rows.len(),
-            |ui, range| {
-                let w = content_w.max(ui.available_width());
-                let vis_right = ui.clip_rect().right();
-                for ri in range {
-                    let (rect, resp) = ui.allocate_exact_size(vec2(w, st.row_h), Sense::click());
-                    let p = ui.painter_at(rect);
-                    let cy = rect.center().y;
-                    match rows[ri] {
-                        Row::File(fi) => {
-                            p.rect_filled(rect, 0.0, theme::bg_btn());
-                            let f = &v.files[fi];
-                            let name = f.path().unwrap_or_else(|| "file".into());
-                            let label = if f.binary {
-                                format!("{name}  (binary)")
-                            } else {
-                                name
-                            };
-                            p.text(
-                                pos2(rect.left() + 10.0, cy),
-                                Align2::LEFT_CENTER,
-                                label,
-                                FontId::proportional(13.0),
-                                theme::text(),
+        let mut area = egui::ScrollArea::both().id_salt(id).auto_shrink(false);
+        if let Some(r) = extras.scroll_to {
+            area = area.vertical_scroll_offset((r as f32 * st.row_h - 80.0).max(0.0));
+        }
+        area.show_rows(ui, st.row_h, rows.len(), |ui, range| {
+            let w = content_w.max(ui.available_width());
+            let vis_right = ui.clip_rect().right();
+            for ri in range {
+                let (rect, resp) = ui.allocate_exact_size(vec2(w, st.row_h), Sense::click());
+                let p = ui.painter_at(rect);
+                let cy = rect.center().y;
+                if let Some(needle) = extras.find
+                    && !matches!(rows[ri], Row::Hunk(..))
+                    && v.row_text(rows[ri]).contains(needle)
+                {
+                    let a = if extras.current_row == Some(ri) {
+                        0.55
+                    } else {
+                        0.22
+                    };
+                    p.rect_filled(rect, 0.0, tinted(theme::amber(), a));
+                }
+                match rows[ri] {
+                    Row::File(fi) => {
+                        p.rect_filled(rect, 0.0, theme::bg_btn());
+                        let f = &v.files[fi];
+                        let name = f.path().unwrap_or_else(|| "file".into());
+                        let label = if f.binary {
+                            format!("{name}  (binary)")
+                        } else {
+                            name
+                        };
+                        p.text(
+                            pos2(rect.left() + 10.0, cy),
+                            Align2::LEFT_CENTER,
+                            label,
+                            FontId::proportional(13.0),
+                            theme::text(),
+                        );
+                    }
+                    Row::Hunk(fi, hi) => {
+                        p.rect_filled(rect, 0.0, tinted(theme::accent(), 0.13));
+                        let h = &v.files[fi].hunks[hi];
+                        p.text(
+                            pos2(rect.left() + 10.0, cy),
+                            Align2::LEFT_CENTER,
+                            &h.header,
+                            st.font.clone(),
+                            theme::accent(),
+                        );
+                        if let Some(sc) = stage {
+                            let n_sel = sel.iter().filter(|(f, hh, _)| *f == fi && *hh == hi).count();
+                            let r = Rect::from_min_max(
+                                pos2(rect.left(), rect.top()),
+                                pos2(vis_right - 8.0, rect.bottom()),
                             );
-                        }
-                        Row::Hunk(fi, hi) => {
-                            p.rect_filled(rect, 0.0, tinted(theme::accent(), 0.13));
-                            let h = &v.files[fi].hunks[hi];
-                            p.text(
-                                pos2(rect.left() + 10.0, cy),
-                                Align2::LEFT_CENTER,
-                                &h.header,
-                                st.font.clone(),
-                                theme::accent(),
-                            );
-                            if let Some(sc) = stage {
-                                let n_sel = sel.iter().filter(|(f, hh, _)| *f == fi && *hh == hi).count();
-                                let r = Rect::from_min_max(
-                                    pos2(rect.left(), rect.top()),
-                                    pos2(vis_right - 8.0, rect.bottom()),
-                                );
-                                ui.scope_builder(
-                                    UiBuilder::new()
-                                        .max_rect(r)
-                                        .layout(Layout::right_to_left(Align::Center)),
-                                    |ui| {
-                                        let sels = |hi_: usize| -> HashSet<usize> {
-                                            sel.iter()
-                                                .filter(|(f, hh, _)| *f == fi && *hh == hi_)
-                                                .map(|(_, _, l)| *l)
-                                                .collect()
-                                        };
-                                        let small =
-                                            |t: &str| egui::Button::new(RichText::new(t).size(12.0)).small();
-                                        let (whole, part, mode) = if sc.staged {
-                                            ("Unstage hunk", "Unstage selected", PatchMode::Unstage)
-                                        } else {
-                                            ("Stage hunk", "Stage selected", PatchMode::Stage)
-                                        };
-                                        if sc.can_discard && !sc.staged {
-                                            if ui.add(small("Discard hunk")).clicked() {
-                                                acts.push(DiffAction::Patch {
-                                                    file: fi,
-                                                    hunk: hi,
-                                                    lines: None,
-                                                    mode: PatchMode::Discard,
-                                                });
-                                            }
-                                            if n_sel > 0 && ui.add(small("Discard selected")).clicked() {
-                                                acts.push(DiffAction::Patch {
-                                                    file: fi,
-                                                    hunk: hi,
-                                                    lines: Some(sels(hi)),
-                                                    mode: PatchMode::Discard,
-                                                });
-                                            }
-                                        }
-                                        if ui.add(small(whole)).clicked() {
+                            ui.scope_builder(
+                                UiBuilder::new()
+                                    .max_rect(r)
+                                    .layout(Layout::right_to_left(Align::Center)),
+                                |ui| {
+                                    let sels = |hi_: usize| -> HashSet<usize> {
+                                        sel.iter()
+                                            .filter(|(f, hh, _)| *f == fi && *hh == hi_)
+                                            .map(|(_, _, l)| *l)
+                                            .collect()
+                                    };
+                                    let small =
+                                        |t: &str| egui::Button::new(RichText::new(t).size(12.0)).small();
+                                    let (whole, part, mode) = if sc.staged {
+                                        ("Unstage hunk", "Unstage selected", PatchMode::Unstage)
+                                    } else {
+                                        ("Stage hunk", "Stage selected", PatchMode::Stage)
+                                    };
+                                    if sc.can_discard && !sc.staged {
+                                        if ui.add(small("Discard hunk")).clicked() {
                                             acts.push(DiffAction::Patch {
                                                 file: fi,
                                                 hunk: hi,
                                                 lines: None,
-                                                mode,
+                                                mode: PatchMode::Discard,
                                             });
                                         }
-                                        if n_sel > 0 && ui.add(small(part)).clicked() {
+                                        if n_sel > 0 && ui.add(small("Discard selected")).clicked() {
                                             acts.push(DiffAction::Patch {
                                                 file: fi,
                                                 hunk: hi,
                                                 lines: Some(sels(hi)),
-                                                mode,
+                                                mode: PatchMode::Discard,
                                             });
                                         }
-                                    },
-                                );
-                            }
+                                    }
+                                    if ui.add(small(whole)).clicked() {
+                                        acts.push(DiffAction::Patch {
+                                            file: fi,
+                                            hunk: hi,
+                                            lines: None,
+                                            mode,
+                                        });
+                                    }
+                                    if n_sel > 0 && ui.add(small(part)).clicked() {
+                                        acts.push(DiffAction::Patch {
+                                            file: fi,
+                                            hunk: hi,
+                                            lines: Some(sels(hi)),
+                                            mode,
+                                        });
+                                    }
+                                },
+                            );
                         }
-                        Row::Line(fi, hi, li) => {
-                            let h = &v.files[fi].hunks[hi];
-                            let line = &h.lines[li];
-                            let c = line.as_bytes().first().copied().unwrap_or(b' ');
-                            let nums = v.nums[fi][hi][li];
-                            let selected = sel.contains(&(fi, hi, li));
-                            let bg = match c {
-                                b'+' => Some(add_bg),
-                                b'-' => Some(del_bg),
-                                _ => None,
-                            };
-                            if let Some(bg) = bg {
-                                p.rect_filled(rect, 0.0, bg);
-                            }
-                            if selected {
-                                p.rect_filled(rect, 0.0, sel_bg);
-                            }
-                            let num = |n: Option<u32>| n.map_or(String::new(), |n| n.to_string());
-                            let gy = pos2(rect.left() + gutter - 8.0, cy);
+                    }
+                    Row::Line(fi, hi, li) => {
+                        let h = &v.files[fi].hunks[hi];
+                        let line = &h.lines[li];
+                        let c = line.as_bytes().first().copied().unwrap_or(b' ');
+                        let nums = v.nums[fi][hi][li];
+                        let selected = sel.contains(&(fi, hi, li));
+                        let bg = match c {
+                            b'+' => Some(add_bg),
+                            b'-' => Some(del_bg),
+                            _ => None,
+                        };
+                        if let Some(bg) = bg {
+                            p.rect_filled(rect, 0.0, bg);
+                        }
+                        if selected {
+                            p.rect_filled(rect, 0.0, sel_bg);
+                        }
+                        let num = |n: Option<u32>| n.map_or(String::new(), |n| n.to_string());
+                        let gy = pos2(rect.left() + gutter - 8.0, cy);
+                        if !v.plain {
                             p.text(
                                 gy,
                                 Align2::RIGHT_CENTER,
@@ -443,124 +564,181 @@ pub fn show(
                                 st.font.clone(),
                                 theme::text_weak(),
                             );
+                        }
+                        p.text(
+                            pos2(gy.x + gutter, cy),
+                            Align2::RIGHT_CENTER,
+                            num(nums.1),
+                            st.font.clone(),
+                            theme::text_weak(),
+                        );
+                        if v.ws_only.contains(&(fi, hi, li)) {
                             p.text(
-                                pos2(gy.x + gutter, cy),
+                                pos2(vis_right - 14.0, cy),
                                 Align2::RIGHT_CENTER,
-                                num(nums.1),
+                                "ws",
+                                FontId::proportional(11.0),
+                                theme::amber(),
+                            );
+                        }
+                        let x = rect.left() + 2.0 * gutter + 4.0;
+                        let marker = match c {
+                            b'+' => "+",
+                            b'-' => "-",
+                            _ => " ",
+                        };
+                        let mcolor = match c {
+                            b'+' => theme::green(),
+                            b'-' => theme::red(),
+                            _ => theme::text_weak(),
+                        };
+                        p.text(pos2(x, cy), Align2::LEFT_CENTER, marker, st.font.clone(), mcolor);
+                        let emph = v
+                            .intra
+                            .get(&(fi, hi, li))
+                            .map(|r| (*r, if c == b'+' { add_emph } else { del_emph }));
+                        let spans = v.spans.get(fi).and_then(|f| f.get(hi)).and_then(|h| h.get(li));
+                        let empty = Vec::new();
+                        draw_code(
+                            &p,
+                            x + st.char_w * 2.0,
+                            cy,
+                            line.get(1..).unwrap_or(""),
+                            spans.unwrap_or(&empty),
+                            &st,
+                            emph,
+                            if c == b'+' {
+                                trailing_ws(line.get(1..).unwrap_or(""))
+                            } else {
+                                None
+                            },
+                        );
+                        if stage.is_some() && h.is_change(li) && resp.clicked() && !sel.remove(&(fi, hi, li))
+                        {
+                            sel.insert((fi, hi, li));
+                        }
+                    }
+                    Row::Sbs(fi, hi, si) => {
+                        let h = &v.files[fi].hunks[hi];
+                        let row = &v.sbs[fi][hi][si];
+                        let mid = rect.left() + half_w;
+                        p.line_segment(
+                            [pos2(mid, rect.top()), pos2(mid, rect.bottom())],
+                            Stroke::new(1.0, theme::border()),
+                        );
+                        let mut clicked_cell = None;
+                        for (cell, left) in [(&row.left, true), (&row.right, false)] {
+                            let x0 = if left { rect.left() } else { mid };
+                            let cell_rect =
+                                Rect::from_min_max(pos2(x0, rect.top()), pos2(x0 + half_w, rect.bottom()));
+                            let Some(cell) = cell else {
+                                p.rect_filled(cell_rect, 0.0, tinted(theme::text_weak(), 0.06));
+                                continue;
+                            };
+                            let cp = p.with_clip_rect(cell_rect);
+                            match cell.kind {
+                                rustle_core::LineKind::Added => {
+                                    cp.rect_filled(cell_rect, 0.0, add_bg);
+                                }
+                                rustle_core::LineKind::Removed => {
+                                    cp.rect_filled(cell_rect, 0.0, del_bg);
+                                }
+                                rustle_core::LineKind::Context => {}
+                            }
+                            if sel.contains(&(fi, hi, cell.line_index)) {
+                                cp.rect_filled(cell_rect, 0.0, sel_bg);
+                            }
+                            cp.text(
+                                pos2(x0 + gutter - 8.0, cy),
+                                Align2::RIGHT_CENTER,
+                                cell.number.map_or(String::new(), |n| n.to_string()),
                                 st.font.clone(),
                                 theme::text_weak(),
                             );
-                            let x = rect.left() + 2.0 * gutter + 4.0;
-                            let marker = match c {
-                                b'+' => "+",
-                                b'-' => "-",
-                                _ => " ",
-                            };
-                            let mcolor = match c {
-                                b'+' => theme::green(),
-                                b'-' => theme::red(),
-                                _ => theme::text_weak(),
-                            };
-                            p.text(pos2(x, cy), Align2::LEFT_CENTER, marker, st.font.clone(), mcolor);
                             let emph = v
                                 .intra
-                                .get(&(fi, hi, li))
-                                .map(|r| (*r, if c == b'+' { add_emph } else { del_emph }));
-                            let spans = v.spans.get(fi).and_then(|f| f.get(hi)).and_then(|h| h.get(li));
+                                .get(&(fi, hi, cell.line_index))
+                                .map(|r| (*r, if left { del_emph } else { add_emph }));
+                            let spans = v
+                                .spans
+                                .get(fi)
+                                .and_then(|f| f.get(hi))
+                                .and_then(|hh| hh.get(cell.line_index));
                             let empty = Vec::new();
                             draw_code(
-                                &p,
-                                x + st.char_w * 2.0,
+                                &cp,
+                                x0 + gutter + 2.0,
                                 cy,
-                                line.get(1..).unwrap_or(""),
+                                &cell.text,
                                 spans.unwrap_or(&empty),
                                 &st,
                                 emph,
+                                if cell.kind == rustle_core::LineKind::Added {
+                                    trailing_ws(&cell.text)
+                                } else {
+                                    None
+                                },
                             );
-                            if stage.is_some()
-                                && h.is_change(li)
-                                && resp.clicked()
-                                && !sel.remove(&(fi, hi, li))
+                            if resp.clicked()
+                                && resp
+                                    .interact_pointer_pos()
+                                    .is_some_and(|pp| cell_rect.contains(pp))
                             {
-                                sel.insert((fi, hi, li));
+                                clicked_cell = Some(cell.line_index);
                             }
                         }
-                        Row::Sbs(fi, hi, si) => {
-                            let h = &v.files[fi].hunks[hi];
-                            let row = &v.sbs[fi][hi][si];
-                            let mid = rect.left() + half_w;
-                            p.line_segment(
-                                [pos2(mid, rect.top()), pos2(mid, rect.bottom())],
-                                Stroke::new(1.0, theme::border()),
-                            );
-                            let mut clicked_cell = None;
-                            for (cell, left) in [(&row.left, true), (&row.right, false)] {
-                                let x0 = if left { rect.left() } else { mid };
-                                let cell_rect = Rect::from_min_max(
-                                    pos2(x0, rect.top()),
-                                    pos2(x0 + half_w, rect.bottom()),
-                                );
-                                let Some(cell) = cell else {
-                                    p.rect_filled(cell_rect, 0.0, tinted(theme::text_weak(), 0.06));
-                                    continue;
-                                };
-                                let cp = p.with_clip_rect(cell_rect);
-                                match cell.kind {
-                                    rustle_core::LineKind::Added => {
-                                        cp.rect_filled(cell_rect, 0.0, add_bg);
-                                    }
-                                    rustle_core::LineKind::Removed => {
-                                        cp.rect_filled(cell_rect, 0.0, del_bg);
-                                    }
-                                    rustle_core::LineKind::Context => {}
-                                }
-                                if sel.contains(&(fi, hi, cell.line_index)) {
-                                    cp.rect_filled(cell_rect, 0.0, sel_bg);
-                                }
-                                cp.text(
-                                    pos2(x0 + gutter - 8.0, cy),
-                                    Align2::RIGHT_CENTER,
-                                    cell.number.map_or(String::new(), |n| n.to_string()),
-                                    st.font.clone(),
-                                    theme::text_weak(),
-                                );
-                                let emph = v
-                                    .intra
-                                    .get(&(fi, hi, cell.line_index))
-                                    .map(|r| (*r, if left { del_emph } else { add_emph }));
-                                let spans = v
-                                    .spans
-                                    .get(fi)
-                                    .and_then(|f| f.get(hi))
-                                    .and_then(|hh| hh.get(cell.line_index));
-                                let empty = Vec::new();
-                                draw_code(
-                                    &cp,
-                                    x0 + gutter + 2.0,
-                                    cy,
-                                    &cell.text,
-                                    spans.unwrap_or(&empty),
-                                    &st,
-                                    emph,
-                                );
-                                if resp.clicked()
-                                    && resp
-                                        .interact_pointer_pos()
-                                        .is_some_and(|pp| cell_rect.contains(pp))
-                                {
-                                    clicked_cell = Some(cell.line_index);
-                                }
-                            }
-                            if let (Some(li), Some(_)) = (clicked_cell, stage)
-                                && h.is_change(li)
-                                && !sel.remove(&(fi, hi, li))
-                            {
-                                sel.insert((fi, hi, li));
-                            }
+                        if let (Some(li), Some(_)) = (clicked_cell, stage)
+                            && h.is_change(li)
+                            && !sel.remove(&(fi, hi, li))
+                        {
+                            sel.insert((fi, hi, li));
                         }
                     }
                 }
-            },
-        );
+            }
+        });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DIFF: &str = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n keep\n-let  x = 1;\n+let x = 1;\n tail  \n";
+
+    #[test]
+    fn finds_rows_in_both_layouts() {
+        let v = DiffView::build("t".into(), DIFF, true);
+        let unified = v.find_rows("let", false);
+        assert_eq!(unified.len(), 2);
+        let sbs = v.find_rows("let", true);
+        assert_eq!(sbs.len(), 1, "the removed/added pair shares one side-by-side row");
+        assert!(v.find_rows("", false).is_empty());
+        assert!(v.find_rows("zzz", false).is_empty());
+    }
+
+    #[test]
+    fn marks_whitespace_only_changes() {
+        let v = DiffView::build("t".into(), DIFF, true);
+        assert_eq!(v.ws_only.len(), 2);
+    }
+
+    #[test]
+    fn trailing_whitespace_columns() {
+        assert_eq!(trailing_ws("abc  "), Some((3, 5)));
+        assert_eq!(trailing_ws("abc"), None);
+        assert_eq!(trailing_ws("a\t"), Some((1, 5)));
+    }
+
+    #[test]
+    fn plain_file_view_has_one_context_hunk() {
+        let v = DiffView::build_file("src/a.rs", "fn main() {}\nlet x = 1;\n", true);
+        assert!(v.plain);
+        assert_eq!(v.files.len(), 1);
+        assert_eq!(v.files[0].hunks[0].lines.len(), 2);
+        assert!(v.files[0].hunks[0].lines.iter().all(|l| l.starts_with(' ')));
+        // File header, hunk header, then the first line.
+        assert_eq!(DiffView::file_line_row(1), 2);
+        assert_eq!(v.find_rows("let", false), vec![DiffView::file_line_row(2)]);
+    }
 }

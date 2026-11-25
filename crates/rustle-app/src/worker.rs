@@ -2,10 +2,12 @@
 //! through channels.
 
 use crate::diffview::DiffView;
+use crate::imagediff::{self, DecodedImage};
 use rustle_core::{
-    BlameLine, Branch, CancelToken, CliBackend, Commit, CommitFile, ConflictVersions, DiffOpts, FileChange,
-    GitError, GitRunner, Graph, GraphRow, LogQuery, OpResult, PatchMode, PullMode, ReflogEntry, ResetMode,
-    Side, StashEntry, Status, Submodule, TodoItem, build_graph,
+    BlameLine, Branch, CancelToken, CliBackend, Commit, CommitFile, ConfigValue, ConflictVersions, DiffOpts,
+    FileChange, GitError, GitRunner, Graph, GraphRow, GrepHit, LfsInfo, LogQuery, OpResult, PatchMode,
+    PullMode, ReflogEntry, Remote, ResetMode, Side, StashEntry, Status, Submodule, TodoItem, Worktree,
+    build_graph,
 };
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -26,6 +28,39 @@ pub enum DiffKind {
     Work,
     /// Diff of a file in a commit or a comparison (detail panel).
     Commit,
+}
+
+/// Where an image of an image diff comes from.
+pub enum ImageSrc {
+    /// A blob in git: `HEAD:path`, `<id>:path`, `:path` (the index).
+    Blob(String),
+    /// A file in the working tree.
+    Worktree(String),
+}
+
+/// Keys shown in the configuration window.
+pub const CONFIG_KEYS: [&str; 9] = [
+    "user.name",
+    "user.email",
+    "pull.rebase",
+    "fetch.prune",
+    "push.autoSetupRemote",
+    "core.autocrlf",
+    "commit.gpgsign",
+    "init.defaultBranch",
+    "merge.conflictstyle",
+];
+
+pub struct ConfigRow {
+    pub key: &'static str,
+    pub value: ConfigValue,
+}
+
+/// Contents of a file for the file viewer.
+pub struct FileData {
+    /// `None` for binary files.
+    pub text: Option<String>,
+    pub size: usize,
 }
 
 pub enum Request {
@@ -60,7 +95,85 @@ pub enum Request {
     Commit {
         message: String,
         amend: bool,
+        /// `Some(true)` = sign, `Some(false)` = do not sign, `None` = follow `commit.gpgsign`.
+        sign: Option<bool>,
+        no_verify: bool,
     },
+    PushBranch(String),
+    FastForward(String),
+
+    LoadRemotes,
+    AddRemote {
+        name: String,
+        url: String,
+    },
+    RenameRemote {
+        old: String,
+        new: String,
+    },
+    SetRemoteUrl {
+        name: String,
+        url: String,
+    },
+    RemoveRemote(String),
+    PruneRemote(String),
+    LoadConfig,
+    SetConfig {
+        key: String,
+        value: String,
+        global: bool,
+    },
+    UnsetConfig {
+        key: String,
+        global: bool,
+    },
+
+    CherryPickMany(Vec<String>),
+    RevertMany(Vec<String>),
+
+    Grep {
+        pattern: String,
+        rev: Option<String>,
+        ignore_case: bool,
+    },
+    LoadFiles(Option<String>),
+    ReadFile {
+        rev: Option<String>,
+        path: String,
+    },
+
+    ConflictMerge(String),
+    WriteResolved {
+        path: String,
+        content: String,
+    },
+
+    ImageDiff {
+        kind: DiffKind,
+        old: Option<ImageSrc>,
+        new: Option<ImageSrc>,
+    },
+
+    AddWorktree {
+        path: String,
+        branch: String,
+        create: bool,
+    },
+    RemoveWorktree {
+        path: String,
+        force: bool,
+    },
+    PruneWorktrees,
+    SubmoduleSync {
+        path: Option<String>,
+        remote: bool,
+    },
+    AddSubmodule {
+        url: String,
+        path: String,
+    },
+    LfsTrack(String),
+    LfsPull,
 
     Fetch,
     Pull,
@@ -125,7 +238,6 @@ pub enum Request {
     StashApply(usize),
     StashPop(usize),
     StashDrop(usize),
-    SubmoduleUpdate,
 
     FileDiff {
         change: FileChange,
@@ -170,6 +282,14 @@ pub struct RepoData {
     pub has_more: bool,
     /// Contents of `commit.template`, if configured.
     pub template: Option<String>,
+    pub head_id: Option<String>,
+    /// The graph including a leading row for the working-tree changes (a node on HEAD's lane).
+    pub graph_wip: Option<Graph>,
+    pub worktrees: Vec<Worktree>,
+    pub git_dir: PathBuf,
+    /// `commit.gpgsign` is on.
+    pub sign_default: bool,
+    pub lfs: LfsInfo,
 }
 
 pub enum Response {
@@ -204,6 +324,37 @@ pub enum Response {
     Info(String),
     /// Result of a background fetch.
     AutoFetch(Result<(), String>),
+    /// What commit hooks printed.
+    HookOutput(String),
+    Signature {
+        id: String,
+        status: char,
+        signer: String,
+    },
+    Remotes(Vec<Remote>),
+    Config(Vec<ConfigRow>),
+    Grep {
+        pattern: String,
+        hits: Vec<GrepHit>,
+    },
+    Files {
+        rev: Option<String>,
+        paths: Vec<String>,
+    },
+    FileContent {
+        rev: Option<String>,
+        path: String,
+        result: Result<FileData, String>,
+    },
+    ConflictMerge {
+        path: String,
+        result: Result<String, String>,
+    },
+    Images {
+        kind: DiffKind,
+        old: Option<DecodedImage>,
+        new: Option<DecodedImage>,
+    },
     Error(String),
     /// Every request ends with exactly one `Idle`.
     Idle,
@@ -239,6 +390,7 @@ pub fn spawn(ctx: eframe::egui::Context, git_path: String, view: ViewOpts, pull:
             pull,
             cancel: CancelToken::new(),
             template: None,
+            sign_default: false,
         };
         for req in req_rx {
             state.cancel = CancelToken::new();
@@ -282,6 +434,7 @@ struct State {
     pull: PullMode,
     cancel: CancelToken,
     template: Option<String>,
+    sign_default: bool,
 }
 
 fn msg(r: OpResult, done: &str) -> Response {
@@ -315,6 +468,7 @@ impl State {
     fn open(&mut self, path: &std::path::Path) -> Result<(), GitError> {
         let b = CliBackend::open(self.runner()?, path)?;
         self.template = b.commit_template();
+        self.sign_default = b.signing_default();
         self.backend = Some(b);
         self.query = LogQuery::default();
         self.limit = INITIAL_LIMIT;
@@ -336,9 +490,37 @@ impl State {
         } else {
             build_graph(&commits)
         };
+        let head_id = commits
+            .iter()
+            .find(|c| c.refs.iter().any(|l| l.is_head))
+            .map(|c| c.id.clone())
+            .or_else(|| b.head_id());
+        let graph_wip = (!q.is_filtered() && !commits.is_empty())
+            .then(|| head_id.clone())
+            .flatten()
+            .map(|head| {
+                let mut with_wip = Vec::with_capacity(commits.len() + 1);
+                with_wip.push(Commit {
+                    id: "WIP".into(),
+                    parents: vec![head],
+                    author_name: String::new(),
+                    author_email: String::new(),
+                    time: 0,
+                    subject: String::new(),
+                    refs: Vec::new(),
+                });
+                with_wip.extend(commits.iter().cloned());
+                build_graph(&with_wip)
+            });
         Ok(Response::Repo(Box::new(RepoData {
             path: b.path().to_path_buf(),
             graph,
+            graph_wip,
+            head_id,
+            worktrees: b.worktrees().unwrap_or_default(),
+            git_dir: b.git_dir().to_path_buf(),
+            sign_default: self.sign_default,
+            lfs: b.lfs_info(),
             commits,
             branches: b.branches()?,
             tags: b.tags()?,
@@ -428,13 +610,172 @@ impl State {
                 self.be()?.add_to_gitignore(&p)?;
                 self.status()?
             }
-            Request::Commit { message, amend } => {
-                if amend {
-                    self.be()?.commit_amend(&message)?;
-                } else {
-                    self.be()?.commit(&message)?;
+            Request::Commit {
+                message,
+                amend,
+                sign,
+                no_verify,
+            } => {
+                let out = self.be()?.commit_with(&message, amend, sign, no_verify)?;
+                let mut v = vec![Response::Committed];
+                if !out.is_empty() {
+                    v.push(Response::HookOutput(out));
                 }
-                vec![Response::Committed, snap(self)?]
+                v.push(snap(self)?);
+                v
+            }
+            Request::PushBranch(name) => {
+                self.be()?.push_branch(&name, Some(&c))?;
+                vec![Response::Info(format!("Pushed {name}")), snap(self)?]
+            }
+            Request::FastForward(name) => {
+                self.be()?.fast_forward_branch(&name, Some(&c))?;
+                vec![Response::Info(format!("Fast-forwarded {name}")), snap(self)?]
+            }
+
+            Request::LoadRemotes => vec![Response::Remotes(self.be()?.remotes()?)],
+            Request::AddRemote { name, url } => {
+                self.be()?.add_remote(&name, &url)?;
+                vec![Response::Remotes(self.be()?.remotes()?)]
+            }
+            Request::RenameRemote { old, new } => {
+                self.be()?.rename_remote(&old, &new)?;
+                vec![Response::Remotes(self.be()?.remotes()?), snap(self)?]
+            }
+            Request::SetRemoteUrl { name, url } => {
+                self.be()?.set_remote_url(&name, &url)?;
+                vec![Response::Remotes(self.be()?.remotes()?)]
+            }
+            Request::RemoveRemote(name) => {
+                self.be()?.remove_remote(&name)?;
+                vec![Response::Remotes(self.be()?.remotes()?), snap(self)?]
+            }
+            Request::PruneRemote(name) => {
+                self.be()?.prune_remote(&name, Some(&c))?;
+                vec![Response::Info(format!("Pruned {name}")), snap(self)?]
+            }
+            Request::LoadConfig => {
+                let b = self.be()?;
+                vec![Response::Config(
+                    CONFIG_KEYS
+                        .iter()
+                        .map(|k| ConfigRow {
+                            key: k,
+                            value: b.get_config(k),
+                        })
+                        .collect(),
+                )]
+            }
+            Request::SetConfig { key, value, global } => {
+                let b = self.be()?;
+                b.set_config(&key, &value, global)?;
+                self.sign_default = b.signing_default();
+                vec![Response::Info(format!("Set {key}"))]
+            }
+            Request::UnsetConfig { key, global } => {
+                self.be()?.unset_config(&key, global)?;
+                vec![Response::Info(format!("Unset {key}"))]
+            }
+
+            Request::CherryPickMany(ids) => {
+                let r = self.be()?.cherry_pick_many(&ids)?;
+                vec![msg(r, "Cherry-pick complete"), snap(self)?]
+            }
+            Request::RevertMany(ids) => {
+                let r = self.be()?.revert_many(&ids)?;
+                vec![msg(r, "Revert complete"), snap(self)?]
+            }
+
+            Request::Grep {
+                pattern,
+                rev,
+                ignore_case,
+            } => {
+                let hits = self.be()?.grep(&pattern, rev.as_deref(), ignore_case, 1000)?;
+                vec![Response::Grep { pattern, hits }]
+            }
+            Request::LoadFiles(rev) => {
+                let b = self.be()?;
+                let paths = match &rev {
+                    Some(r) => b.ls_tree(r)?,
+                    None => b.ls_files()?,
+                };
+                vec![Response::Files { rev, paths }]
+            }
+            Request::ReadFile { rev, path } => {
+                let b = self.be()?;
+                let bytes = match &rev {
+                    Some(r) => b.blob(&format!("{r}:{path}")),
+                    None => b.worktree_file(&path),
+                };
+                let result = bytes.map_err(|e| e.to_string()).map(|bytes| {
+                    let size = bytes.len();
+                    let text = (size <= 2_000_000 && !bytes.contains(&0))
+                        .then(|| String::from_utf8(bytes).ok())
+                        .flatten();
+                    FileData { text, size }
+                });
+                vec![Response::FileContent { rev, path, result }]
+            }
+
+            Request::ConflictMerge(path) => {
+                let result = self.be()?.conflict_merge(&path).map_err(|e| e.to_string());
+                vec![Response::ConflictMerge { path, result }]
+            }
+            Request::WriteResolved { path, content } => {
+                self.be()?.write_resolved(&path, &content)?;
+                self.status()?
+            }
+
+            Request::ImageDiff { kind, old, new } => {
+                let b = self.be()?;
+                let load = |src: Option<ImageSrc>| -> Option<DecodedImage> {
+                    let bytes = match src? {
+                        ImageSrc::Blob(spec) => b.blob(&spec).ok()?,
+                        ImageSrc::Worktree(p) => b.worktree_file(&p).ok()?,
+                    };
+                    if bytes.len() > 40_000_000 {
+                        return None;
+                    }
+                    imagediff::decode(&bytes).ok()
+                };
+                vec![Response::Images {
+                    kind,
+                    old: load(old),
+                    new: load(new),
+                }]
+            }
+
+            Request::AddWorktree { path, branch, create } => {
+                self.be()?.add_worktree(&path, &branch, create)?;
+                vec![Response::Info("Worktree added".into()), snap(self)?]
+            }
+            Request::RemoveWorktree { path, force } => {
+                self.be()?.remove_worktree(&path, force)?;
+                vec![Response::Info("Worktree removed".into()), snap(self)?]
+            }
+            Request::PruneWorktrees => {
+                self.be()?.prune_worktrees()?;
+                vec![snap(self)?]
+            }
+            Request::SubmoduleSync { path, remote } => {
+                self.be()?.submodule_sync(path.as_deref(), remote, Some(&c))?;
+                vec![Response::Info("Submodules updated".into()), snap(self)?]
+            }
+            Request::AddSubmodule { url, path } => {
+                self.be()?.add_submodule(&url, &path, Some(&c))?;
+                vec![Response::Info("Submodule added".into()), snap(self)?]
+            }
+            Request::LfsTrack(pattern) => {
+                self.be()?.lfs_track(&pattern)?;
+                vec![
+                    Response::Info(format!("Tracking {pattern} with Git LFS")),
+                    snap(self)?,
+                ]
+            }
+            Request::LfsPull => {
+                self.be()?.lfs_pull(Some(&c))?;
+                vec![Response::Info("LFS objects downloaded".into()), snap(self)?]
             }
 
             Request::AutoFetch => {
@@ -583,10 +924,6 @@ impl State {
                 self.be()?.stash_drop(i)?;
                 vec![snap(self)?]
             }
-            Request::SubmoduleUpdate => {
-                self.be()?.submodule_update(Some(&c))?;
-                vec![Response::Info("Submodules updated".into()), snap(self)?]
-            }
 
             Request::FileDiff { change, staged } => {
                 let text = self.be()?.file_diff(&change, staged, self.view.diff)?;
@@ -595,16 +932,24 @@ impl State {
             }
             Request::CommitInfo(id) => {
                 let b = self.be()?;
-                vec![
+                let mut v = vec![
                     Response::CommitBody {
                         body: b.commit_message(&id)?,
                         id: id.clone(),
                     },
                     Response::CommitFiles {
                         files: b.commit_files(&id)?,
-                        key: id,
+                        key: id.clone(),
                     },
-                ]
+                ];
+                if let Ok(sig) = b.signature(&id) {
+                    v.push(Response::Signature {
+                        id,
+                        status: sig.status,
+                        signer: sig.signer,
+                    });
+                }
+                v
             }
             Request::CommitFileDiff { id, path } => {
                 let text = self.be()?.commit_file_diff(&id, &path, self.view.diff)?;

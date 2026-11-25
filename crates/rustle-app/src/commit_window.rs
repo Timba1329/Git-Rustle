@@ -1,14 +1,23 @@
 //! The commit window: unstaged files on top, staged files below, message and actions at the
-//! bottom of the left column, and the diff (or conflict versions) of the selected file on the right.
+//! bottom of the left column, and the diff (conflict editor, image diff) of the selected file on the
+//! right.
 
-use crate::diffview::{self, DiffAction, StageCtx};
-use crate::panels::status_color;
+use crate::diffview::{self, DiffAction, StageCtx, ViewExtras};
+use crate::imagediff;
+use crate::panels::{find_bar, status_color};
 use crate::settings::Settings;
-use crate::tab::{Act, AppAct, Dialog, Tab};
-use crate::theme::{accent, amber, bg_btn, bg_btn_hover, bold, primary_button, red, text, text_weak};
+use crate::tab::{Act, AppAct, ConflictEditor, Dialog, Tab};
+use crate::theme::{
+    accent, amber, bg_btn, bg_btn_hover, bg_input, bold, border, green, primary_button, purple, red, text,
+    text_weak,
+};
 use crate::worker::Request;
-use eframe::egui::{self, Align, Align2, FontId, Layout, Margin, Rect, RichText, Sense, Ui, pos2, vec2};
+use eframe::egui::{
+    self, Align, Align2, FontId, Frame, Layout, Margin, Rect, RichText, Sense, Stroke, Ui, pos2, vec2,
+};
+use rustle_core::conflict::{Choice, Segment};
 use rustle_core::{FileChange, OpState, Side};
+use std::collections::HashSet;
 
 fn status_letter(c: &FileChange, staged: bool) -> char {
     if c.conflicted {
@@ -35,6 +44,7 @@ fn file_row(
     is_staged: bool,
     selected: bool,
     busy: bool,
+    is_lfs: bool,
 ) -> (RowClick, egui::Response) {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
     let p = ui.painter_at(rect);
@@ -53,13 +63,14 @@ fn file_row(
         status_color(letter),
     );
 
+    let right_pad = if is_lfs { 62.0 } else { 30.0 };
     let (dir, name) = match f.path.rsplit_once('/') {
         Some((d, n)) => (format!("{d}/"), n),
         None => (String::new(), f.path.as_str()),
     };
     let tp = p.with_clip_rect(Rect::from_min_max(
         rect.min,
-        pos2(rect.right() - 30.0, rect.bottom()),
+        pos2(rect.right() - right_pad, rect.bottom()),
     ));
     let g = tp.layout_no_wrap(name.to_string(), FontId::proportional(13.5), text());
     let x = rect.left() + 28.0;
@@ -73,6 +84,13 @@ fn file_row(
             FontId::proportional(12.0),
             text_weak(),
         );
+    }
+    if is_lfs {
+        let g = p.layout_no_wrap("LFS".into(), FontId::proportional(10.5), purple());
+        let size = g.size() + vec2(8.0, 2.0);
+        let br = Rect::from_min_size(pos2(rect.right() - 62.0 + 6.0, cy - size.y / 2.0), size);
+        p.rect_filled(br, 3.0, purple().gamma_multiply(0.18));
+        p.galley(br.min + vec2(4.0, 1.0), g, purple());
     }
 
     let btn = Rect::from_center_size(pos2(rect.right() - 15.0, cy), vec2(22.0, 22.0));
@@ -110,20 +128,150 @@ fn section_header(ui: &mut Ui, title: &str, count: usize, add_buttons: impl FnOn
 }
 
 fn small(label: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(label).size(12.0))
+    egui::Button::new(RichText::new(label).size(12.0)).small()
+}
+
+/// A few lines of unchanged text between conflicts.
+fn context_text(ui: &mut Ui, t: &str) {
+    let lines: Vec<&str> = t.lines().collect();
+    let shown: Vec<String> = if lines.len() > 6 {
+        let mut v: Vec<String> = lines[..2].iter().map(|s| (*s).to_string()).collect();
+        v.push(format!("⋯ {} unchanged lines ⋯", lines.len() - 4));
+        v.extend(lines[lines.len() - 2..].iter().map(|s| (*s).to_string()));
+        v
+    } else {
+        lines.iter().map(|s| (*s).to_string()).collect()
+    };
+    for l in shown {
+        ui.label(RichText::new(l).monospace().size(12.0).color(text_weak()));
+    }
+}
+
+fn conflict_column(ui: &mut Ui, title: &str, body: &str, color: egui::Color32) {
+    Frame::new()
+        .fill(color.gamma_multiply(0.10))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.35)))
+        .corner_radius(4)
+        .inner_margin(Margin::same(6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(title).size(11.0).color(color));
+            ui.label(
+                RichText::new(if body.is_empty() { "(empty)" } else { body })
+                    .monospace()
+                    .size(12.0),
+            );
+        });
+}
+
+/// The three-way conflict editor: pick ours, theirs, both, the base, or write your own per block.
+fn conflict_editor_ui(ui: &mut Ui, e: &mut ConflictEditor, busy: bool, acts: &mut Vec<Act>) {
+    let total = e.choices.len();
+    let resolved = e.choices.iter().filter(|c| c.is_some()).count();
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!("{resolved} of {total} resolved")).color(if resolved == total {
+                green()
+            } else {
+                amber()
+            }),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if primary_button(ui, "Save and mark resolved", resolved == total && !busy).clicked() {
+                acts.push(Act::ConflictWrite);
+            }
+            if ui.add(small("All theirs")).clicked() {
+                e.choices.iter_mut().for_each(|c| *c = Some(Choice::Theirs));
+            }
+            if ui.add(small("All ours")).clicked() {
+                e.choices.iter_mut().for_each(|c| *c = Some(Choice::Ours));
+            }
+        });
+    });
+    ui.separator();
+    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        let mut k = 0;
+        for seg in &e.segs {
+            match seg {
+                Segment::Text(t) => context_text(ui, t),
+                Segment::Conflict(b) => {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(bold(format!("Conflict {} of {total}", k + 1), 13.0));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let choice = &mut e.choices[k];
+                            let is = |c: &Option<Choice>, t: &Choice| c.as_ref() == Some(t);
+                            if ui
+                                .selectable_label(matches!(choice, Some(Choice::Custom(_))), "Edit")
+                                .clicked()
+                            {
+                                if e.custom[k].is_empty() {
+                                    e.custom[k] = b.ours.clone();
+                                }
+                                *choice = Some(Choice::Custom(String::new()));
+                            }
+                            if b.base.is_some()
+                                && ui.selectable_label(is(choice, &Choice::Base), "Base").clicked()
+                            {
+                                *choice = Some(Choice::Base);
+                            }
+                            if ui.selectable_label(is(choice, &Choice::Both), "Both").clicked() {
+                                *choice = Some(Choice::Both);
+                            }
+                            if ui
+                                .selectable_label(is(choice, &Choice::Theirs), "Theirs")
+                                .clicked()
+                            {
+                                *choice = Some(Choice::Theirs);
+                            }
+                            if ui.selectable_label(is(choice, &Choice::Ours), "Ours").clicked() {
+                                *choice = Some(Choice::Ours);
+                            }
+                        });
+                    });
+                    let cols = if b.base.is_some() { 3 } else { 2 };
+                    ui.columns(cols, |c| {
+                        conflict_column(&mut c[0], &format!("Ours — {}", b.ours_label), &b.ours, accent());
+                        let mut next = 1;
+                        if let Some(base) = &b.base {
+                            conflict_column(&mut c[1], "Base", base, text_weak());
+                            next = 2;
+                        }
+                        conflict_column(
+                            &mut c[next],
+                            &format!("Theirs — {}", b.theirs_label),
+                            &b.theirs,
+                            purple(),
+                        );
+                    });
+                    if matches!(e.choices[k], Some(Choice::Custom(_))) {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut e.custom[k])
+                                .code_editor()
+                                .desired_rows(4)
+                                .desired_width(f32::INFINITY),
+                        );
+                    }
+                    k += 1;
+                }
+            }
+        }
+    });
 }
 
 impl Tab {
     #[allow(clippy::too_many_lines)]
     pub fn commit_popup(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>, settings: &mut Settings) {
         let busy = self.busy();
-        let (files, op, repo_path, branch) = {
-            let Some(r) = &self.repo else { return };
+        let (files, op, repo_path, branch, lfs) = {
+            let Some(r) = &mut self.repo else { return };
             (
                 r.status.files.clone(),
                 r.status.op,
                 r.path.clone(),
                 r.status.branch.clone().unwrap_or_else(|| "detached HEAD".into()),
+                // Moved out for the duration of the window instead of cloned every frame.
+                std::mem::take(&mut r.lfs.files),
             )
         };
         let conflicted: Vec<&FileChange> = files.iter().filter(|f| f.conflicted).collect();
@@ -191,7 +339,7 @@ impl Tab {
                         } else {
                             26.0 + 24.0 * conflicted.len() as f32
                         };
-                        let list_total = (total.y - 215.0 - conflict_h).max(180.0);
+                        let list_total = (total.y - 245.0 - conflict_h).max(180.0);
                         let usable = list_total - 64.0;
                         let (unstaged_h, staged_h) = match (unstaged.is_empty(), staged.is_empty()) {
                             (false, false) => (usable / 2.0, usable / 2.0),
@@ -226,7 +374,8 @@ impl Tab {
                                     for f in list.iter().copied() {
                                         let selected =
                                             self.selected_file.as_ref() == Some(&(f.path.clone(), is_staged));
-                                        let (click, resp) = file_row(ui, f, is_staged, selected, busy);
+                                        let (click, resp) =
+                                            file_row(ui, f, is_staged, selected, busy, lfs.contains(&f.path));
                                         match click {
                                             RowClick::Select => {
                                                 acts.push(Act::SelectFile(f.clone(), is_staged))
@@ -278,6 +427,15 @@ impl Tab {
                                 ui.label(RichText::new(format!("{subject_len}/72")).size(12.0).color(color));
                             });
                         });
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 12.0;
+                            ui.checkbox(&mut self.sign, "Sign commit").on_hover_text(
+                                "Uses your GPG or SSH signing key (see user.signingkey and gpg.format)",
+                            );
+                            ui.checkbox(&mut self.no_verify, "Skip hooks").on_hover_text(
+                                "Passes --no-verify: pre-commit and commit-msg hooks are not run",
+                            );
+                        });
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
                             if op != OpState::None {
@@ -320,7 +478,8 @@ impl Tab {
                             ui.label(RichText::new("Ctrl+Enter").size(11.5).color(text_weak()));
                         });
                         if let Some(e) = &self.error {
-                            ui.colored_label(red(), e);
+                            let first: String = e.lines().next().unwrap_or("").chars().take(160).collect();
+                            ui.colored_label(red(), first);
                         }
                     });
 
@@ -332,37 +491,56 @@ impl Tab {
                         Layout::top_down(Align::Min),
                         |ui| {
                             let title = self
-                                .conflict
+                                .conflict_edit
                                 .as_ref()
-                                .map(|(p, _)| format!("{p} — conflict"))
+                                .map(|e| format!("{} — conflict", e.path))
+                                .or_else(|| self.conflict.as_ref().map(|(p, _)| format!("{p} — conflict")))
                                 .or_else(|| self.file_diff.as_ref().map(|d| d.title.clone()))
                                 .unwrap_or_else(|| "No file selected".into());
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 ui.label(bold(title, 13.0));
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    let mut reload = false;
-                                    reload |= ui
-                                        .checkbox(&mut settings.ignore_whitespace, "Ignore whitespace")
-                                        .changed();
-                                    reload |=
-                                        ui.checkbox(&mut settings.side_by_side, "Side by side").changed();
-                                    if reload {
-                                        settings.save();
-                                        acts.push(Act::ReloadView);
-                                    }
-                                });
+                                let mut reload = false;
+                                reload |= ui.checkbox(&mut settings.side_by_side, "Side by side").changed();
+                                reload |= ui
+                                    .checkbox(&mut settings.ignore_whitespace, "Ignore whitespace")
+                                    .changed();
+                                if ui
+                                    .checkbox(&mut settings.show_whitespace, "Show whitespace")
+                                    .changed()
+                                {
+                                    settings.save();
+                                }
+                                reload |= ui.checkbox(&mut self.full_file, "Whole file").changed();
+                                if reload {
+                                    settings.save();
+                                    acts.push(Act::ReloadView);
+                                }
                             });
                             ui.separator();
-                            self.right_pane(ui, acts, settings);
+                            self.right_pane(ui, acts, settings, busy);
                         },
                     );
                 });
             });
+        if let Some(r) = &mut self.repo {
+            r.lfs.files = lfs;
+        }
         self.commit_open = open && !close;
     }
 
-    fn right_pane(&mut self, ui: &mut Ui, acts: &mut Vec<Act>, settings: &Settings) {
+    fn right_pane(&mut self, ui: &mut Ui, acts: &mut Vec<Act>, settings: &Settings, busy: bool) {
+        if let Some(e) = &mut self.conflict_edit {
+            conflict_editor_ui(ui, e, busy, acts);
+            return;
+        }
         if let Some((_, v)) = &self.conflict {
+            ui.label(
+                RichText::new(
+                    "This file can't be merged here (binary or not UTF-8). Pick a side on the left.",
+                )
+                .size(12.0)
+                .color(text_weak()),
+            );
             ui.columns(3, |c| {
                 for (i, (title, body)) in [
                     ("Base", &v.base),
@@ -393,7 +571,22 @@ impl Tab {
             return;
         };
         if d.is_binary() {
-            ui.label(RichText::new("Binary file — no text diff.").color(text_weak()));
+            match &mut self.work_image {
+                Some(img) if img.has_any() => imagediff::show(ui, img),
+                Some(_) => {
+                    ui.label(RichText::new("Binary file — no preview.").color(text_weak()));
+                }
+                None if self
+                    .selected_file
+                    .as_ref()
+                    .is_some_and(|(p, _)| imagediff::is_image_path(p)) =>
+                {
+                    ui.label(RichText::new("Loading image…").color(text_weak()));
+                }
+                None => {
+                    ui.label(RichText::new("Binary file — no text diff.").color(text_weak()));
+                }
+            }
             return;
         }
         if d.is_empty() {
@@ -411,6 +604,14 @@ impl Tab {
             staged: staged_view,
             can_discard: !untracked,
         });
+        let (needle, current, scroll) =
+            find_bar(ui, &mut self.find, &mut self.find_pos, d, settings.side_by_side);
+        let extras = ViewExtras {
+            find: needle.as_deref(),
+            current_row: current,
+            scroll_to: scroll,
+            show_ws: settings.show_whitespace,
+        };
         let mut da = Vec::<DiffAction>::new();
         diffview::show(
             ui,
@@ -419,9 +620,13 @@ impl Tab {
             settings.side_by_side,
             &mut self.file_sel,
             ctx,
+            &extras,
             &mut da,
         );
         acts.extend(da.into_iter().map(Act::Diff));
+        let _ = (bg_input, border);
+        let _: Option<&HashSet<String>> = None;
+        let _ = Rect::NOTHING;
     }
 }
 
@@ -476,6 +681,14 @@ fn row_menu(
                 ui.close();
                 acts.push(Act::Blame(f.path.clone()));
             }
+        }
+        if ui.button("View file").clicked() {
+            ui.close();
+            acts.push(Act::OpenFile {
+                rev: None,
+                path: f.path.clone(),
+                line: None,
+            });
         }
         if ui.button("Open in editor").clicked() {
             ui.close();

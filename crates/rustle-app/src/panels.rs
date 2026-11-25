@@ -1,19 +1,21 @@
 //! Drawing of the main panels of a tab: header, sidebar, commit graph and commit details.
 
-use crate::diffview::{self, DiffAction};
+use crate::diffview::{self, DiffAction, DiffView, ViewExtras};
 use crate::fmt;
+use crate::imagediff;
 use crate::settings::Settings;
 use crate::tab::{Act, AppAct, Dialog, InputKind, RebaseRow, Tab};
 use crate::theme::{
     accent, amber, bg_bar, bg_btn, bg_main, bg_side, bold, border, ghost, green, icon_button, nav_row,
     nav_row_badges, primary_button, purple, red, section_label, text, text_weak,
 };
-use crate::worker::Request;
+use crate::worker::{RepoData, Request};
 use eframe::egui::{
-    self, Align, Align2, Color32, FontId, Frame, Layout, Margin, Rect, RichText, Sense, Stroke, Ui, pos2,
-    vec2,
+    self, Align, Align2, Color32, FontId, Frame, Layout, Margin, Modifiers, Rect, RichText, Sense, Stroke,
+    Ui, pos2, vec2,
 };
 use rustle_core::{Branch, Commit, CommitFile, GraphRow, OpState, RefKind, TodoAction};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 const LANE_W: f32 = 14.0;
@@ -51,7 +53,7 @@ fn item(ui: &mut Ui, label: &str) -> bool {
     clicked
 }
 
-fn ctx_item(ui: &mut Ui, label: &str, enabled: bool) -> bool {
+pub fn ctx_item(ui: &mut Ui, label: &str, enabled: bool) -> bool {
     let clicked = ui
         .add_enabled(enabled, egui::Button::new(label).frame(false))
         .clicked();
@@ -73,7 +75,7 @@ pub fn status_color(letter: char) -> Color32 {
 
 /// Walks the first-parent chain from `from` (usually HEAD) down to `to`; returns the commits
 /// after `to`, oldest first, or `None` when `to` is not on that chain.
-fn first_parent_chain<'a>(commits: &'a [Commit], from: &str, to: &str) -> Option<Vec<&'a Commit>> {
+fn first_parent_chain_to<'a>(commits: &'a [Commit], from: &str, to: &str) -> Option<Vec<&'a Commit>> {
     let mut out = Vec::new();
     let mut cur = from.to_string();
     for _ in 0..commits.len() + 1 {
@@ -137,6 +139,66 @@ fn small(label: &str) -> egui::Button<'_> {
     egui::Button::new(RichText::new(label).size(12.5))
 }
 
+/// "Find in diff" box with previous/next; returns the lowercase needle, the row of the current match
+/// and a row to scroll to (only set right after the user moved).
+pub fn find_bar(
+    ui: &mut Ui,
+    find: &mut String,
+    pos: &mut usize,
+    view: &DiffView,
+    sbs: bool,
+) -> (Option<String>, Option<usize>, Option<usize>) {
+    let mut moved = false;
+    ui.horizontal(|ui| {
+        let te = ui.add(
+            egui::TextEdit::singleline(find)
+                .hint_text("Find")
+                .desired_width(150.0)
+                .margin(Margin::symmetric(6, 2)),
+        );
+        if te.changed() {
+            *pos = 0;
+            moved = true;
+        }
+        if te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            *pos += 1;
+            moved = true;
+            te.request_focus();
+        }
+    });
+    let needle = find.trim().to_lowercase();
+    if needle.is_empty() {
+        return (None, None, None);
+    }
+    let rows = view.find_rows(&needle, sbs);
+    ui.horizontal(|ui| {
+        if ui.add_enabled(!rows.is_empty(), small("◀")).clicked() {
+            *pos = pos.checked_sub(1).unwrap_or(rows.len().saturating_sub(1));
+            moved = true;
+        }
+        if ui.add_enabled(!rows.is_empty(), small("▶")).clicked() {
+            *pos += 1;
+            moved = true;
+        }
+        let shown = if rows.is_empty() {
+            0
+        } else {
+            (*pos % rows.len()) + 1
+        };
+        ui.label(
+            RichText::new(format!("{shown}/{}", rows.len()))
+                .size(12.0)
+                .color(text_weak()),
+        );
+    });
+    if rows.is_empty() {
+        return (Some(needle), None, None);
+    }
+    *pos %= rows.len();
+    let row = rows[*pos];
+    (Some(needle), Some(row), moved.then_some(row))
+}
+
 impl Tab {
     // ------------------------------------------------------------------ header
 
@@ -175,9 +237,10 @@ impl Tab {
                             }
                             ui.separator();
                             if item(ui, "Open repository…")
-                                && let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                    acts.push(Act::App(AppAct::OpenPath(dir)));
-                                }
+                                && let Some(dir) = rfd::FileDialog::new().pick_folder()
+                            {
+                                acts.push(Act::App(AppAct::OpenPath(dir)));
+                            }
                             if item(ui, "Clone repository…") {
                                 acts.push(Act::App(AppAct::Clone));
                             }
@@ -258,7 +321,7 @@ impl Tab {
                         }
                         ui.add_space(4.0);
                         ui.menu_button(RichText::new("⋯").size(15.0), |ui| {
-                            ui.set_min_width(230.0);
+                            ui.set_min_width(250.0);
                             let path = r.path.clone();
                             if item(ui, "Stash changes…") {
                                 acts.push(Act::Dialog(Dialog::Input {
@@ -279,11 +342,39 @@ impl Tab {
                                     req: Some(Request::Push { force: true }),
                                 }));
                             }
-                            if item(ui, "Update submodules") {
-                                acts.push(Act::Send(Request::SubmoduleUpdate));
-                            }
                             if item(ui, "Reflog…") {
                                 acts.push(Act::ShowReflog);
+                            }
+                            ui.separator();
+                            if item(ui, "Repository settings…") {
+                                acts.push(Act::OpenRepoSettings);
+                            }
+                            if item(ui, "Add worktree…") {
+                                acts.push(Act::Dialog(Dialog::AddWorktree {
+                                    path: String::new(),
+                                    branch: String::new(),
+                                    create: true,
+                                }));
+                            }
+                            if item(ui, "Add submodule…") {
+                                acts.push(Act::Dialog(Dialog::AddSubmodule {
+                                    url: String::new(),
+                                    path: String::new(),
+                                }));
+                            }
+                            if item(ui, "Update all submodules") {
+                                acts.push(Act::Send(Request::SubmoduleSync {
+                                    path: None,
+                                    remote: false,
+                                }));
+                            }
+                            if item(ui, "Track with Git LFS…") {
+                                acts.push(Act::Dialog(Dialog::TrackLfs {
+                                    pattern: String::new(),
+                                }));
+                            }
+                            if r.lfs.available && item(ui, "Pull LFS objects") {
+                                acts.push(Act::Send(Request::LfsPull));
                             }
                             ui.separator();
                             if item(ui, "Open in Explorer") {
@@ -330,8 +421,7 @@ impl Tab {
                         };
                         let fetch_label = match &self.auto_fetch_error {
                             Some(e) => {
-                                tip = format!("The last automatic fetch failed:
-{e}");
+                                tip = format!("The last automatic fetch failed:\n{e}");
                                 RichText::new("Fetch  !").size(12.5).color(amber())
                             }
                             None => RichText::new("Fetch").size(12.5),
@@ -416,6 +506,19 @@ impl Tab {
             .or_else(|| self.info.as_ref().map(|i| (i.clone(), green())));
         if let Some((msg, color)) = note {
             let is_err = self.error.is_some();
+            // Long or multi-line errors (hook output, git messages) are shortened; the full text
+            // is one click away.
+            let long = is_err && (msg.contains('\n') || msg.chars().count() > 180);
+            let shown = if long {
+                let first = msg.lines().next().unwrap_or("");
+                let mut s: String = first.chars().take(180).collect();
+                if first.chars().count() > 180 || msg.lines().count() > 1 {
+                    s.push('…');
+                }
+                s
+            } else {
+                msg.clone()
+            };
             ui.add_space(6.0);
             Frame::new()
                 .fill(color.gamma_multiply(0.12))
@@ -425,7 +528,7 @@ impl Tab {
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(&msg).color(color));
+                        ui.label(RichText::new(&shown).color(color));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if icon_button(ui, "✕", "Dismiss", true).clicked() {
                                 if is_err {
@@ -433,6 +536,9 @@ impl Tab {
                                 } else {
                                     self.info = None;
                                 }
+                            }
+                            if long && ui.add(small("Details")).clicked() {
+                                acts.push(Act::ShowDetails);
                             }
                         });
                     });
@@ -444,16 +550,28 @@ impl Tab {
 
     #[allow(clippy::too_many_lines)]
     pub fn sidebar(&mut self, ui: &mut Ui, acts: &mut Vec<Act>) {
-        let Some(r) = &self.repo else { return };
+        if self.repo.is_none() {
+            return;
+        }
         let busy = self.busy();
-        let current = r.status.branch.clone();
         let frame = Frame::new().fill(bg_side()).inner_margin(Margin::symmetric(8, 8));
         egui::Panel::left("sidebar")
             .frame(frame)
             .show_separator_line(true)
-            .default_size(220.0)
-            .size_range(170.0..=420.0)
+            .default_size(230.0)
+            .size_range(170.0..=460.0)
             .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.sidebar_files, false, "Refs");
+                    ui.selectable_value(&mut self.sidebar_files, true, "Files");
+                });
+                ui.add_space(4.0);
+                if self.sidebar_files {
+                    self.files_sidebar(ui, acts);
+                    return;
+                }
+                let Some(r) = &self.repo else { return };
+                let current = r.status.branch.clone();
                 let heading = |text: String| RichText::new(text).size(10.5).color(text_weak());
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -490,6 +608,19 @@ impl Tab {
                             if ctx_item(ui, "Check out", !b.is_head) {
                                 acts.push(Act::Send(Request::Checkout(b.clone())));
                             }
+                            let has_up = b.upstream.is_some() && !b.gone;
+                            let push_label = if has_up { "Push" } else { "Publish branch" };
+                            if ctx_item(ui, push_label, !busy && (b.ahead > 0 || !has_up)) {
+                                acts.push(Act::Send(Request::PushBranch(b.name.clone())));
+                            }
+                            if ctx_item(
+                                ui,
+                                "Fast-forward to upstream",
+                                !busy && !b.is_head && has_up && b.behind > 0 && b.ahead == 0,
+                            ) {
+                                acts.push(Act::Send(Request::FastForward(b.name.clone())));
+                            }
+                            ui.separator();
                             if let Some(cur) = &current {
                                 if ctx_item(ui, &format!("Merge into {cur}"), !b.is_head) {
                                     acts.push(Act::Send(Request::Merge(b.name.clone())));
@@ -635,6 +766,52 @@ impl Tab {
                                 }
                             });
                     }
+                    if r.worktrees.len() > 1 {
+                        egui::CollapsingHeader::new(heading(format!("WORKTREES  {}", r.worktrees.len())))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                for w in &r.worktrees {
+                                    let is_cur = same_path(Path::new(&w.path), &r.path);
+                                    let label = format!(
+                                        "{}  ·  {}",
+                                        folder_name(Path::new(&w.path)),
+                                        w.branch.as_deref().unwrap_or("detached")
+                                    );
+                                    let dot = if w.is_main { green() } else { accent() };
+                                    let resp = nav_row(ui, &label, is_cur, Some(dot)).on_hover_text(&w.path);
+                                    if resp.double_clicked() && !is_cur {
+                                        acts.push(Act::App(AppAct::OpenPath(PathBuf::from(&w.path))));
+                                    }
+                                    resp.context_menu(|ui| {
+                                        if ctx_item(ui, "Open in new tab", !is_cur) {
+                                            acts.push(Act::App(AppAct::OpenPath(PathBuf::from(&w.path))));
+                                        }
+                                        if ctx_item(ui, "Open in Explorer", true) {
+                                            acts.push(Act::App(AppAct::Explorer(PathBuf::from(&w.path))));
+                                        }
+                                        if ctx_item(ui, "Remove…", !w.is_main && !is_cur) {
+                                            acts.push(Act::Dialog(Dialog::Confirm {
+                                                title: "Remove worktree".into(),
+                                                text: format!(
+                                                    "Remove the worktree at {}? Uncommitted changes in it are lost.",
+                                                    w.path
+                                                ),
+                                                button: "Remove".into(),
+                                                req: Some(Request::RemoveWorktree {
+                                                    path: w.path.clone(),
+                                                    force: true,
+                                                }),
+                                            }));
+                                        }
+                                    });
+                                }
+                                if r.worktrees.iter().any(|w| w.prunable)
+                                    && ui.add(small("Prune stale worktrees")).clicked()
+                                {
+                                    acts.push(Act::Send(Request::PruneWorktrees));
+                                }
+                            });
+                    }
                     if !r.submodules.is_empty() {
                         egui::CollapsingHeader::new(heading(format!("SUBMODULES  {}", r.submodules.len())))
                             .default_open(true)
@@ -645,13 +822,58 @@ impl Tab {
                                         '-' => text_weak(),
                                         _ => amber(),
                                     };
-                                    nav_row(ui, &s.path, false, Some(dot)).on_hover_text(match s.status {
+                                    let resp = nav_row(ui, &s.path, false, Some(dot)).on_hover_text(match s.status {
                                         ' ' => "Up to date",
                                         '-' => "Not initialised",
                                         '+' => "Checked out at a different commit",
                                         _ => "Has conflicts",
                                     });
+                                    if resp.double_clicked() && s.status != '-' {
+                                        acts.push(Act::App(AppAct::OpenPath(r.path.join(&s.path))));
+                                    }
+                                    resp.context_menu(|ui| {
+                                        if ctx_item(ui, "Open in new tab", s.status != '-') {
+                                            acts.push(Act::App(AppAct::OpenPath(r.path.join(&s.path))));
+                                        }
+                                        let label = if s.status == '-' { "Initialise and update" } else { "Update" };
+                                        if ctx_item(ui, label, !busy) {
+                                            acts.push(Act::Send(Request::SubmoduleSync {
+                                                path: Some(s.path.clone()),
+                                                remote: false,
+                                            }));
+                                        }
+                                        if ctx_item(ui, "Update to latest on its remote", !busy) {
+                                            acts.push(Act::Send(Request::SubmoduleSync {
+                                                path: Some(s.path.clone()),
+                                                remote: true,
+                                            }));
+                                        }
+                                    });
                                 }
+                            });
+                    }
+                    if !r.lfs.patterns.is_empty() {
+                        egui::CollapsingHeader::new(heading(format!("GIT LFS  {}", r.lfs.patterns.len())))
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                for pat in &r.lfs.patterns {
+                                    nav_row(ui, pat, false, Some(text_weak()));
+                                }
+                                if !r.lfs.available {
+                                    ui.label(
+                                        RichText::new("git-lfs is not installed").size(12.0).color(amber()),
+                                    );
+                                }
+                                ui.horizontal(|ui| {
+                                    if ui.add(small("Track…")).clicked() {
+                                        acts.push(Act::Dialog(Dialog::TrackLfs {
+                                            pattern: String::new(),
+                                        }));
+                                    }
+                                    if r.lfs.available && ui.add_enabled(!busy, small("Pull objects")).clicked() {
+                                        acts.push(Act::Send(Request::LfsPull));
+                                    }
+                                });
                             });
                     }
                 });
@@ -701,31 +923,55 @@ impl Tab {
                     });
                     return;
                 }
-                let graph_w = r.graph.width.max(1) as f32 * LANE_W + 12.0;
-                let ctrl = ui.input(|i| i.modifiers.command);
+                // With uncommitted changes the graph gets an extra first row for them.
+                let wip = r
+                    .graph_wip
+                    .as_ref()
+                    .filter(|_| !r.status.files.is_empty() && !r.query.is_filtered());
+                let graph = wip.unwrap_or(&r.graph);
+                let off = usize::from(wip.is_some());
+                let graph_w = graph.width.max(1) as f32 * LANE_W + 12.0;
+                let mods: Modifiers = ui.input(|i| i.modifiers);
                 let selected = self.selected;
+                let multi: HashSet<&str> = self.multi.iter().map(String::as_str).collect();
                 let compare = self.compare_id.clone();
-                let head_id = r
-                    .commits
-                    .iter()
-                    .find(|c| c.refs.iter().any(|l| l.is_head))
-                    .map(|c| c.id.clone());
+                let head_id = r.head_id.clone();
                 let mut last_visible = 0;
                 ui.spacing_mut().item_spacing.y = 0.0;
                 egui::ScrollArea::vertical().auto_shrink(false).show_rows(
                     ui,
                     ROW_H,
-                    r.commits.len(),
+                    r.commits.len() + off,
                     |ui, range| {
                         last_visible = range.end;
                         for i in range {
-                            let is_sel =
-                                selected == Some(i) || compare.as_deref() == Some(r.commits[i].id.as_str());
-                            commit_row(ui, r, i, graph_w, is_sel, ctrl, head_id.as_deref(), acts);
+                            if off == 1 && i == 0 {
+                                wip_row(ui, r, graph_w, &graph.rows[0], acts);
+                                continue;
+                            }
+                            let ci = i - off;
+                            let c = &r.commits[ci];
+                            let state = RowState {
+                                selected: selected == Some(ci) || compare.as_deref() == Some(c.id.as_str()),
+                                in_multi: multi.contains(c.id.as_str()),
+                                mods,
+                                draggable: self.reorderable.contains(&c.id),
+                            };
+                            commit_row(
+                                ui,
+                                r,
+                                ci,
+                                &graph.rows[i],
+                                graph_w,
+                                &state,
+                                head_id.as_deref(),
+                                &self.reorderable,
+                                acts,
+                            );
                         }
                     },
                 );
-                if r.has_more && !self.load_more_sent && last_visible + 40 >= r.commits.len() {
+                if r.has_more && !self.load_more_sent && last_visible + 40 >= r.commits.len() + off {
                     self.load_more_sent = true;
                     acts.push(Act::Send(Request::LoadMore));
                 }
@@ -792,8 +1038,12 @@ impl Tab {
                             );
                             let hint = if self.compare_id.is_some() {
                                 RichText::new("Comparing two commits").size(12.0).color(accent())
+                            } else if self.multi.len() >= 2 {
+                                RichText::new(format!("{} selected", self.multi.len()))
+                                    .size(12.0)
+                                    .color(accent())
                             } else {
-                                RichText::new("Ctrl+click a second commit to compare")
+                                RichText::new("Ctrl/Shift+click selects several commits")
                                     .size(12.0)
                                     .color(text_weak())
                             };
@@ -809,8 +1059,68 @@ impl Tab {
 
     // ------------------------------------------------------------------ commit details
 
+    /// The panel that replaces the details when several commits are selected.
+    fn multi_panel(&mut self, ui: &mut Ui, acts: &mut Vec<Act>) {
+        let frame = Frame::new()
+            .fill(bg_side())
+            .inner_margin(Margin::symmetric(12, 8));
+        let busy = self.busy();
+        let squash = self.squash_dialog().map(|_| ());
+        let sorted: Vec<String> = self
+            .multi_sorted()
+            .iter()
+            .map(|(_, c)| format!("{}  {}", c.short_id(), c.subject))
+            .collect();
+        let n = sorted.len();
+        egui::Panel::bottom("detail")
+            .frame(frame)
+            .show_separator_line(true)
+            .resizable(true)
+            .default_size(220.0)
+            .show(ui, |ui| {
+                ui.label(bold(format!("{n} commits selected"), 14.5));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let tip = squash.as_ref().err().cloned().unwrap_or_default();
+                    if ui
+                        .add_enabled(!busy && squash.is_ok(), small("Squash…"))
+                        .on_disabled_hover_text(tip)
+                        .clicked()
+                    {
+                        acts.push(Act::SquashSelected);
+                    }
+                    if ui.add_enabled(!busy, small("Cherry-pick")).clicked() {
+                        acts.push(Act::CherryPickSelected);
+                    }
+                    if ui.add_enabled(!busy, small("Revert")).clicked() {
+                        acts.push(Act::RevertSelected);
+                    }
+                    if ui
+                        .add_enabled(n == 2, small("Compare"))
+                        .on_disabled_hover_text("Select exactly two commits")
+                        .clicked()
+                    {
+                        acts.push(Act::CompareSelected);
+                    }
+                    if ui.add(small("Clear selection")).clicked() {
+                        acts.push(Act::ClearMulti);
+                    }
+                });
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                    for s in &sorted {
+                        ui.label(RichText::new(s).size(12.5));
+                    }
+                });
+            });
+    }
+
     #[allow(clippy::too_many_lines)]
     pub fn detail_panel(&mut self, ui: &mut Ui, acts: &mut Vec<Act>, settings: &mut Settings) {
+        if self.multi.len() >= 2 {
+            self.multi_panel(ui, acts);
+            return;
+        }
         let Some(id) = self.selected_id.clone() else {
             return;
         };
@@ -833,17 +1143,37 @@ impl Tab {
                         .as_ref()
                         .map(|a| format!("  ·  compared with {}", &a[..a.len().min(7)]))
                         .unwrap_or_default();
-                    ui.label(
-                        RichText::new(format!(
-                            "{} <{}>  ·  {}  ·  {}{cmp}",
-                            c.author_name,
-                            c.author_email,
-                            fmt::date(c.time, true),
-                            c.short_id()
-                        ))
-                        .size(12.0)
-                        .color(text_weak()),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} <{}>  ·  {}  ·  {}{cmp}",
+                                c.author_name,
+                                c.author_email,
+                                fmt::date(c.time, true),
+                                c.short_id()
+                            ))
+                            .size(12.0)
+                            .color(text_weak()),
+                        );
+                        if let Some((_, st, who)) = &self.signature {
+                            let (label, color) = match st {
+                                'G' => ("Signed", green()),
+                                'U' => ("Signed, key not trusted", amber()),
+                                'B' => ("Bad signature", red()),
+                                'X' | 'Y' | 'R' => ("Signature expired or revoked", amber()),
+                                'E' => ("Signature cannot be checked", amber()),
+                                _ => ("", text_weak()),
+                            };
+                            if !label.is_empty() {
+                                let l = if who.is_empty() {
+                                    label.to_string()
+                                } else {
+                                    format!("{label}: {who}")
+                                };
+                                ui.label(RichText::new(l).size(12.0).color(color));
+                            }
+                        }
+                    });
                 }
                 if !self.commit_body.is_empty() {
                     ui.add_space(4.0);
@@ -855,12 +1185,21 @@ impl Tab {
                         });
                 }
                 ui.add_space(4.0);
+                let mut reload = false;
                 ui.horizontal(|ui| {
-                    let mut reload = false;
                     reload |= ui.checkbox(&mut settings.side_by_side, "Side by side").changed();
                     reload |= ui
                         .checkbox(&mut settings.ignore_whitespace, "Ignore whitespace")
                         .changed();
+                    if ui
+                        .checkbox(&mut settings.show_whitespace, "Show whitespace")
+                        .changed()
+                    {
+                        settings.save();
+                    }
+                    if ui.checkbox(&mut self.full_file, "Whole file").changed() {
+                        reload = true;
+                    }
                     ui.label(RichText::new("Context").size(12.0).color(text_weak()));
                     if ui
                         .add(
@@ -872,11 +1211,11 @@ impl Tab {
                     {
                         reload = true;
                     }
-                    if reload {
-                        settings.save();
-                        acts.push(Act::ReloadView);
-                    }
                 });
+                if reload {
+                    settings.save();
+                    acts.push(Act::ReloadView);
+                }
                 ui.add_space(2.0);
                 ui.separator();
                 if self.commit_files.is_empty() {
@@ -894,34 +1233,87 @@ impl Tab {
                                 ui.spacing_mut().item_spacing.y = 0.0;
                                 for f in &self.commit_files {
                                     let sel = self.selected_cfile.as_deref() == Some(f.path.as_str());
-                                    if commit_file_row(ui, f, sel).clicked() {
+                                    let resp = commit_file_row(ui, f, sel);
+                                    if resp.clicked() {
                                         acts.push(Act::SelectCommitFile(f.path.clone()));
                                     }
+                                    let rev = self.selected_id.clone();
+                                    resp.context_menu(|ui| {
+                                        if ctx_item(ui, "View file at this commit", f.status != 'D') {
+                                            acts.push(Act::OpenFile {
+                                                rev: rev.clone(),
+                                                path: f.path.clone(),
+                                                line: None,
+                                            });
+                                        }
+                                        if ctx_item(ui, "File history", true) {
+                                            acts.push(Act::History(f.path.clone()));
+                                        }
+                                        if ctx_item(ui, "Blame", f.status != 'D') {
+                                            acts.push(Act::Blame(f.path.clone()));
+                                        }
+                                        if ctx_item(ui, "Copy path", true) {
+                                            ui.ctx().copy_text(f.path.clone());
+                                        }
+                                    });
                                 }
                             });
                     });
                     ui.separator();
-                    ui.vertical(|ui| match &self.commit_diff {
-                        Some(d) if d.is_binary() => {
-                            ui.label(RichText::new("Binary file — no text diff.").color(text_weak()));
+                    ui.vertical(|ui| {
+                        let binary = self.commit_diff.as_ref().is_some_and(DiffView::is_binary);
+                        if binary {
+                            match &mut self.commit_image {
+                                Some(img) if img.has_any() => imagediff::show(ui, img),
+                                Some(_) => {
+                                    ui.label(RichText::new("Binary file — no preview.").color(text_weak()));
+                                }
+                                None if self
+                                    .selected_cfile
+                                    .as_deref()
+                                    .is_some_and(imagediff::is_image_path) =>
+                                {
+                                    ui.label(RichText::new("Loading image…").color(text_weak()));
+                                }
+                                None => {
+                                    ui.label(RichText::new("Binary file — no text diff.").color(text_weak()));
+                                }
+                            }
+                            return;
                         }
-                        Some(d) if d.is_empty() => {
-                            ui.label(RichText::new("No textual changes.").color(text_weak()));
-                        }
-                        Some(d) => {
-                            let mut none = Vec::<DiffAction>::new();
-                            diffview::show(
-                                ui,
-                                "commit-diff",
-                                d,
-                                settings.side_by_side,
-                                &mut self.commit_sel,
-                                None,
-                                &mut none,
-                            );
-                        }
-                        None => {
-                            ui.label(RichText::new("Loading…").color(text_weak()));
+                        match &self.commit_diff {
+                            Some(d) if d.is_empty() => {
+                                ui.label(RichText::new("No textual changes.").color(text_weak()));
+                            }
+                            Some(d) => {
+                                let (needle, current, scroll) = find_bar(
+                                    ui,
+                                    &mut self.find,
+                                    &mut self.find_pos,
+                                    d,
+                                    settings.side_by_side,
+                                );
+                                let extras = ViewExtras {
+                                    find: needle.as_deref(),
+                                    current_row: current,
+                                    scroll_to: scroll,
+                                    show_ws: settings.show_whitespace,
+                                };
+                                let mut none = Vec::<DiffAction>::new();
+                                diffview::show(
+                                    ui,
+                                    "commit-diff",
+                                    d,
+                                    settings.side_by_side,
+                                    &mut self.commit_sel,
+                                    None,
+                                    &extras,
+                                    &mut none,
+                                );
+                            }
+                            None => {
+                                ui.label(RichText::new("Loading…").color(text_weak()));
+                            }
                         }
                     });
                 });
@@ -990,28 +1382,93 @@ fn draw_graph(p: &egui::Painter, rect: Rect, row: &GraphRow, is_merge: bool, bg:
     }
 }
 
+/// The row for uncommitted changes, drawn above HEAD.
+fn wip_row(ui: &mut Ui, r: &RepoData, graph_w: f32, grow: &GraphRow, acts: &mut Vec<Act>) {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
+    let p = ui.painter_at(rect);
+    if resp.hovered() {
+        p.rect_filled(rect, 0.0, bg_side());
+    }
+    // Lines as usual, but a hollow node: this is not a commit (yet).
+    let mut node_less = grow.clone();
+    node_less.color = 7;
+    draw_graph(&p, rect, &node_less, true, bg_main());
+
+    let files = &r.status.files;
+    let staged = files.iter().filter(|f| f.is_staged()).count();
+    let unstaged = files.iter().filter(|f| f.is_unstaged() && !f.conflicted).count();
+    let conflicts = files.iter().filter(|f| f.conflicted).count();
+    let cy = rect.center().y;
+    let mut x = rect.left() + graph_w;
+    p.text(
+        pos2(x + 2.0, cy),
+        Align2::LEFT_CENTER,
+        "Working changes",
+        FontId::proportional(13.5),
+        text_weak(),
+    );
+    x += 125.0;
+    for (n, label, color) in [
+        (staged, "staged", green()),
+        (unstaged, "unstaged", amber()),
+        (conflicts, "conflicted", red()),
+    ] {
+        if n == 0 {
+            continue;
+        }
+        let g = p.layout_no_wrap(format!("{n} {label}"), FontId::proportional(11.5), color);
+        let size = g.size() + vec2(10.0, 3.0);
+        let br = Rect::from_min_size(pos2(x, cy - size.y / 2.0), size);
+        p.rect_filled(br, 3.0, color.gamma_multiply(0.15));
+        p.galley(br.min + vec2(5.0, 1.5), g, color);
+        x += size.x + 5.0;
+    }
+    if resp.clicked() {
+        acts.push(Act::OpenCommit);
+    }
+    resp.on_hover_text("Click to review and commit your changes");
+}
+
+/// What a commit row needs to know about the current selection and drag state.
+struct RowState {
+    selected: bool,
+    in_multi: bool,
+    mods: Modifiers,
+    draggable: bool,
+}
+
 /// Draws one commit row and its context menu.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn commit_row(
     ui: &mut Ui,
-    r: &crate::worker::RepoData,
+    r: &RepoData,
     i: usize,
+    grow: &GraphRow,
     graph_w: f32,
-    selected: bool,
-    ctrl: bool,
+    state: &RowState,
     head_id: Option<&str>,
+    reorderable: &HashSet<String>,
     acts: &mut Vec<Act>,
 ) {
     let c = &r.commits[i];
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
+    let sense = if state.draggable {
+        Sense::click_and_drag()
+    } else {
+        Sense::click()
+    };
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), sense);
     let p = ui.painter_at(rect);
-    if selected {
-        p.rect_filled(rect, 0.0, accent().gamma_multiply(0.14));
+    if state.selected || state.in_multi {
+        p.rect_filled(
+            rect,
+            0.0,
+            accent().gamma_multiply(if state.in_multi { 0.22 } else { 0.14 }),
+        );
         p.rect_filled(Rect::from_min_size(rect.min, vec2(2.0, ROW_H)), 0.0, accent());
     } else if resp.hovered() {
         p.rect_filled(rect, 0.0, bg_side());
     }
-    draw_graph(&p, rect, &r.graph.rows[i], c.parents.len() > 1, bg_main());
+    draw_graph(&p, rect, grow, c.parents.len() > 1, bg_main());
 
     let cy = rect.center().y;
     let right = rect.right() - 14.0;
@@ -1079,8 +1536,29 @@ fn commit_row(
             text_weak(),
         );
     }
+
+    // Drag a not-yet-pushed commit onto another one to move it above that commit.
+    if state.draggable && resp.drag_started() {
+        resp.dnd_set_drag_payload(c.id.clone());
+    }
+    if reorderable.contains(&c.id) && resp.dnd_hover_payload::<String>().is_some() {
+        p.hline(rect.x_range(), rect.top() + 1.0, Stroke::new(2.0, accent()));
+    }
+    if let Some(from) = resp.dnd_release_payload::<String>()
+        && reorderable.contains(&c.id)
+    {
+        acts.push(Act::DropCommit {
+            from: (*from).clone(),
+            to: c.id.clone(),
+        });
+    }
+
     if resp.clicked() {
-        acts.push(Act::SelectCommit { idx: i, ctrl });
+        acts.push(Act::SelectCommit {
+            idx: i,
+            ctrl: state.mods.command,
+            shift: state.mods.shift,
+        });
     }
     let on_head_line = head_id.is_some();
     let id = c.id.clone();
@@ -1119,7 +1597,7 @@ fn commit_row(
         }
         if ctx_item(ui, "Interactive rebase from here…", on_head_line) {
             let from = head_id.unwrap_or_default();
-            match first_parent_chain(&r.commits, from, &id) {
+            match first_parent_chain_to(&r.commits, from, &id) {
                 Some(chain) if !chain.is_empty() => {
                     let rows = chain
                         .iter()
@@ -1144,6 +1622,9 @@ fn commit_row(
             }
         }
         ui.separator();
+        if ctx_item(ui, "Browse files at this commit", true) {
+            acts.push(Act::BrowseAt(Some(id.clone())));
+        }
         if ctx_item(ui, "Copy hash", true) {
             ui.ctx().copy_text(id.clone());
         }

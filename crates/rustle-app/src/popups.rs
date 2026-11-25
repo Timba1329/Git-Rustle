@@ -90,6 +90,10 @@ impl Tab {
                                         old: old.clone(),
                                         new: v,
                                     },
+                                    InputKind::RenameRemote { old } => Request::RenameRemote {
+                                        old: old.clone(),
+                                        new: v,
+                                    },
                                     InputKind::NewBranch => Request::CreateBranch(v),
                                     InputKind::Stash => Request::StashPush {
                                         message: v,
@@ -284,6 +288,205 @@ impl Tab {
                 }
                 keep
             }
+            Dialog::Squash {
+                base,
+                plan,
+                message,
+                count,
+                warning,
+            } => {
+                let mut keep = true;
+                egui::Window::new(bold(format!("Squash {count} commits"), 15.0))
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_size([540.0, 380.0])
+                    .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+                    .show(ctx, |ui| {
+                        ui.label("The selected commits become one commit with the message below. Commits after them are replayed on top.");
+                        if let Some(w) = warning {
+                            ui.add_space(4.0);
+                            ui.colored_label(amber(), w.as_str());
+                        }
+                        ui.add_space(6.0);
+                        ui.add(
+                            egui::TextEdit::multiline(message)
+                                .desired_rows(8)
+                                .desired_width(f32::INFINITY)
+                                .margin(Margin::symmetric(8, 6)),
+                        );
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if primary_button(ui, "Squash", !message.trim().is_empty()).clicked() {
+                                let mut first = true;
+                                let items = plan
+                                    .iter()
+                                    .map(|(id, selected)| {
+                                        if !*selected {
+                                            TodoItem { action: TodoAction::Pick, id: id.clone(), message: None }
+                                        } else if std::mem::take(&mut first) {
+                                            TodoItem {
+                                                action: TodoAction::Reword,
+                                                id: id.clone(),
+                                                message: Some(message.trim().to_string()),
+                                            }
+                                        } else {
+                                            TodoItem { action: TodoAction::Fixup, id: id.clone(), message: None }
+                                        }
+                                    })
+                                    .collect();
+                                acts.push(Act::Send(Request::InteractiveRebase { base: base.clone(), items }));
+                                keep = false;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                keep = false;
+                            }
+                        });
+                    });
+                keep
+            }
+            Dialog::AddWorktree { path, branch, create } => {
+                let mut keep = true;
+                let branches: Vec<String> = self
+                    .repo
+                    .as_ref()
+                    .map(|r| {
+                        r.branches
+                            .iter()
+                            .filter(|b| !b.is_remote)
+                            .map(|b| b.name.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                egui::Window::new(bold("Add worktree", 15.0))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+                    .show(ctx, |ui| {
+                        ui.set_min_width(440.0);
+                        ui.label("A worktree is a second working folder for the same repository, with its own branch checked out.");
+                        ui.add_space(6.0);
+                        ui.label("Folder");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(path).desired_width(320.0).margin(Margin::symmetric(6, 4)));
+                            if ui.button("Browse…").clicked()
+                                && let Some(p) = rfd::FileDialog::new().pick_folder()
+                            {
+                                *path = p.display().to_string();
+                            }
+                        });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.radio_value(create, true, "New branch");
+                            ui.radio_value(create, false, "Existing branch");
+                        });
+                        if *create {
+                            ui.add(
+                                egui::TextEdit::singleline(branch)
+                                    .hint_text("name of the new branch")
+                                    .desired_width(f32::INFINITY)
+                                    .margin(Margin::symmetric(6, 4)),
+                            );
+                        } else {
+                            egui::ComboBox::from_id_salt("wt-branch")
+                                .selected_text(if branch.is_empty() { "choose a branch" } else { branch.as_str() })
+                                .show_ui(ui, |ui| {
+                                    for b in &branches {
+                                        ui.selectable_value(branch, b.clone(), b);
+                                    }
+                                });
+                        }
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            let ok = !path.trim().is_empty() && !branch.trim().is_empty();
+                            if primary_button(ui, "Add", ok).clicked() {
+                                acts.push(Act::Send(Request::AddWorktree {
+                                    path: path.trim().to_string(),
+                                    branch: branch.trim().to_string(),
+                                    create: *create,
+                                }));
+                                keep = false;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                keep = false;
+                            }
+                        });
+                    });
+                keep
+            }
+            Dialog::AddSubmodule { url, path } => {
+                let mut keep = true;
+                egui::Window::new(bold("Add submodule", 15.0))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+                    .show(ctx, |ui| {
+                        ui.set_min_width(460.0);
+                        ui.label("Repository URL");
+                        ui.add(
+                            egui::TextEdit::singleline(url)
+                                .hint_text("https://github.com/owner/library.git")
+                                .desired_width(f32::INFINITY)
+                                .margin(Margin::symmetric(6, 4)),
+                        );
+                        ui.label("Path inside this repository");
+                        ui.add(
+                            egui::TextEdit::singleline(path)
+                                .hint_text("libs/library")
+                                .desired_width(f32::INFINITY)
+                                .margin(Margin::symmetric(6, 4)),
+                        );
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            let ok = !url.trim().is_empty() && !path.trim().is_empty();
+                            if primary_button(ui, "Add", ok).clicked() {
+                                acts.push(Act::Send(Request::AddSubmodule {
+                                    url: url.trim().to_string(),
+                                    path: path.trim().to_string(),
+                                }));
+                                keep = false;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                keep = false;
+                            }
+                        });
+                    });
+                keep
+            }
+            Dialog::TrackLfs { pattern } => {
+                let mut keep = true;
+                egui::Window::new(bold("Track with Git LFS", 15.0))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+                    .show(ctx, |ui| {
+                        ui.set_min_width(380.0);
+                        ui.label("File pattern to store in Git LFS");
+                        let te = ui.add(
+                            egui::TextEdit::singleline(pattern)
+                                .hint_text("*.psd")
+                                .desired_width(f32::INFINITY)
+                                .margin(Margin::symmetric(6, 4)),
+                        );
+                        te.request_focus();
+                        ui.label(
+                            RichText::new("This edits .gitattributes; commit it together with the files.")
+                                .size(12.0)
+                                .color(text_weak()),
+                        );
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            let ok = !pattern.trim().is_empty();
+                            if (primary_button(ui, "Track", ok).clicked() || (enter && ok)) && ok {
+                                acts.push(Act::Send(Request::LfsTrack(pattern.trim().to_string())));
+                                keep = false;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                keep = false;
+                            }
+                        });
+                    });
+                keep
+            }
         };
         if keep && matches!(self.dialog, Dialog::None) {
             self.dialog = d;
@@ -294,6 +497,42 @@ impl Tab {
 
     #[allow(clippy::too_many_lines)]
     pub fn info_windows(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+        // Output of commit hooks and long error messages.
+        let mut close_hook = false;
+        if let Some(t) = &self.hook_output {
+            let mut open = true;
+            egui::Window::new(bold("Output of the commit hooks", 15.0))
+                .open(&mut open)
+                .default_size([640.0, 320.0])
+                .show(ctx, |ui| {
+                    egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                        ui.label(RichText::new(t).monospace().size(12.5));
+                    });
+                });
+            close_hook = !open;
+        }
+        if close_hook {
+            self.hook_output = None;
+        }
+        let mut close_details = false;
+        if let Some(t) = &self.details {
+            let mut open = true;
+            egui::Window::new(bold("Details", 15.0))
+                .open(&mut open)
+                .default_size([700.0, 360.0])
+                .show(ctx, |ui| {
+                    if ui.small_button("Copy").clicked() {
+                        ui.ctx().copy_text(t.clone());
+                    }
+                    egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                        ui.label(RichText::new(t).monospace().size(12.5));
+                    });
+                });
+            close_details = !open;
+        }
+        if close_details {
+            self.details = None;
+        }
         let mut close_blame = false;
         if let Some((path, lines)) = &self.blame {
             let mut open = true;
@@ -431,6 +670,18 @@ impl Tab {
             true
         } else if self.reflog.is_some() {
             self.reflog = None;
+            true
+        } else if self.hook_output.is_some() {
+            self.hook_output = None;
+            true
+        } else if self.details.is_some() {
+            self.details = None;
+            true
+        } else if self.viewer.is_some() {
+            self.viewer = None;
+            true
+        } else if self.repo_settings_open {
+            self.repo_settings_open = false;
             true
         } else if self.commit_open {
             self.commit_open = false;

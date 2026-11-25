@@ -2,16 +2,21 @@
 
 mod app;
 mod askpass;
+mod commands;
 mod commit_window;
 mod diffview;
+mod files_panel;
 mod fmt;
+mod imagediff;
 mod panels;
 mod popups;
 mod recent;
+mod repo_settings;
 mod settings;
 mod tab;
 mod theme;
 mod update;
+mod watcher;
 mod worker;
 
 use settings::Settings;

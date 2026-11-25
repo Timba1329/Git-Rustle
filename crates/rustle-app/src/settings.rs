@@ -22,6 +22,10 @@ pub struct Settings {
     /// Fetch in the background every N minutes (0 = never).
     pub auto_fetch_minutes: u32,
     pub side_by_side: bool,
+    /// Show spaces as dots in diffs.
+    pub show_whitespace: bool,
+    /// Reload automatically when files change on disk.
+    pub watch_files: bool,
     /// Editor command used by "Open in editor", e.g. `code`.
     pub editor: String,
     /// Check GitHub for new releases (at most once a day).
@@ -53,6 +57,8 @@ impl Default for Settings {
             context: 3,
             auto_fetch_minutes: 5,
             side_by_side: false,
+            show_whitespace: false,
+            watch_files: true,
             editor: "code".into(),
             check_updates: true,
             update_repo: String::new(),
@@ -139,6 +145,8 @@ impl Settings {
                 "context" => s.context = v.parse().unwrap_or(3).min(50),
                 "auto_fetch_minutes" => s.auto_fetch_minutes = v.parse().unwrap_or(5).min(240),
                 "side_by_side" => s.side_by_side = v == "true",
+                "show_whitespace" => s.show_whitespace = v == "true",
+                "watch_files" => s.watch_files = v != "false",
                 "editor" => s.editor = unesc(v),
                 "update_repo" => s.update_repo = unesc(v),
                 "check_updates" => s.check_updates = v != "false",
@@ -187,6 +195,8 @@ impl Settings {
         put("context", self.context.to_string());
         put("auto_fetch_minutes", self.auto_fetch_minutes.to_string());
         put("side_by_side", self.side_by_side.to_string());
+        put("show_whitespace", self.show_whitespace.to_string());
+        put("watch_files", self.watch_files.to_string());
         put("editor", esc(&self.editor));
         put("update_repo", esc(&self.update_repo));
         put("check_updates", self.check_updates.to_string());
@@ -234,6 +244,8 @@ mod tests {
         s.side_by_side = true;
         s.auto_fetch_minutes = 12;
         s.check_updates = false;
+        s.show_whitespace = true;
+        s.watch_files = false;
         s.last_update_check = 1_700_000_000;
         s.pending_update = "v9.9.9".into();
         s.git_path = "C:\\Tools\\git.exe".into();
@@ -249,6 +261,7 @@ mod tests {
         assert!(t.side_by_side);
         assert_eq!(t.auto_fetch_minutes, 12);
         assert!(!t.check_updates);
+        assert!(t.show_whitespace && !t.watch_files);
         assert_eq!(t.last_update_check, 1_700_000_000);
         assert_eq!(t.pending_update, "v9.9.9");
         assert_eq!(t.git_path, "C:\\Tools\\git.exe");

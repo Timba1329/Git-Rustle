@@ -1,8 +1,9 @@
 //! Application shell: tabs, settings, about, clone dialog, shortcuts and window state.
 
+use crate::commands::{self, Command};
 use crate::recent::Recent;
 use crate::settings::{Settings, ThemeMode};
-use crate::tab::{Act, AppAct, Tab};
+use crate::tab::{Act, AppAct, Dialog, InputKind, Tab};
 use crate::theme::{
     self, accent, amber, bg_bar, bg_btn, bg_btn_hover, bg_side, bold, icon_button, primary_button, red,
     section_label, text, text_weak,
@@ -14,7 +15,7 @@ use eframe::egui::{
 };
 use rustle_core::PullMode;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::Command as Process;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 enum UpdateState {
@@ -41,10 +42,15 @@ fn now_secs() -> i64 {
 /// Opens a GitHub address in the default browser.
 fn open_url(url: &str) {
     if url.starts_with("https://github.com/") {
-        let mut c = Command::new("cmd");
+        let mut c = Process::new("cmd");
         c.args(["/C", "start", "", url]);
         spawn_hidden(c);
     }
+}
+
+struct PaletteState {
+    query: String,
+    selected: usize,
 }
 
 struct CloneState {
@@ -60,6 +66,7 @@ pub struct App {
     show_settings: bool,
     show_about: bool,
     clone: Option<CloneState>,
+    palette: Option<PaletteState>,
     ident_name: String,
     ident_email: String,
     ident_wait: bool,
@@ -76,7 +83,7 @@ pub struct App {
     win_max: bool,
 }
 
-fn spawn_hidden(mut cmd: Command) {
+fn spawn_hidden(mut cmd: Process) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -88,15 +95,15 @@ fn spawn_hidden(mut cmd: Command) {
 fn open_explorer(p: &Path) {
     #[cfg(windows)]
     {
-        let _ = Command::new("explorer").arg(p).spawn();
+        let _ = Process::new("explorer").arg(p).spawn();
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("open").arg(p).spawn();
+        let _ = Process::new("open").arg(p).spawn();
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let _ = Command::new("xdg-open").arg(p).spawn();
+        let _ = Process::new("xdg-open").arg(p).spawn();
     }
 }
 
@@ -104,8 +111,8 @@ fn open_terminal(p: &Path) {
     #[cfg(windows)]
     {
         // Windows Terminal when available, otherwise a plain console window.
-        if Command::new("wt").arg("-d").arg(p).spawn().is_err() {
-            let _ = Command::new("cmd")
+        if Process::new("wt").arg("-d").arg(p).spawn().is_err() {
+            let _ = Process::new("cmd")
                 .args(["/C", "start", "cmd.exe"])
                 .current_dir(p)
                 .spawn();
@@ -113,7 +120,7 @@ fn open_terminal(p: &Path) {
     }
     #[cfg(not(windows))]
     {
-        let _ = Command::new("x-terminal-emulator").current_dir(p).spawn();
+        let _ = Process::new("x-terminal-emulator").current_dir(p).spawn();
     }
 }
 
@@ -125,13 +132,13 @@ fn open_editor(editor: &str, p: &Path) {
     }
     #[cfg(windows)]
     {
-        let mut c = Command::new("cmd");
+        let mut c = Process::new("cmd");
         c.args(["/C", editor]).arg(p);
         spawn_hidden(c);
     }
     #[cfg(not(windows))]
     {
-        let mut c = Command::new(editor);
+        let mut c = Process::new(editor);
         c.arg(p);
         spawn_hidden(c);
     }
@@ -170,6 +177,7 @@ impl App {
             show_settings: false,
             show_about: false,
             clone: None,
+            palette: None,
             ident_name: String::new(),
             ident_email: String::new(),
             ident_wait: false,
@@ -256,7 +264,7 @@ impl App {
 
     fn restart(&mut self, ctx: &egui::Context) {
         if let Some(exe) = &self.exe_path {
-            let mut c = Command::new(exe);
+            let mut c = Process::new(exe);
             c.args(std::env::args_os().skip(1));
             if c.spawn().is_ok() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -485,19 +493,260 @@ impl App {
         }
     }
 
-    fn shortcuts(&mut self, ctx: &egui::Context, acts: &mut Vec<AppAct>) {
-        let (open, new_tab, close_tab, settings, find, refresh, next_tab, esc) = ctx.input_mut(|i| {
+    /// Runs a command chosen in the palette.
+    #[allow(clippy::too_many_lines)]
+    fn run_command(&mut self, ctx: &egui::Context, cmd: Command, app_acts: &mut Vec<AppAct>) {
+        let mut tab_acts: Vec<Act> = Vec::new();
+        match cmd {
+            Command::OpenRepository => {
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    app_acts.push(AppAct::OpenPath(dir));
+                }
+            }
+            Command::CloneRepository => app_acts.push(AppAct::Clone),
+            Command::NewRepository => app_acts.push(AppAct::PickAndInit),
+            Command::NewTab => app_acts.push(AppAct::NewTab),
+            Command::CloseTab => {
+                let i = self.active;
+                self.close_tab(ctx, i);
+            }
+            Command::Settings => app_acts.push(AppAct::Settings),
+            Command::About => app_acts.push(AppAct::About),
+            Command::CheckUpdates => {
+                self.open_settings();
+                self.spawn_check(ctx);
+            }
+            Command::ToggleTheme => {
+                self.settings.theme = match self.settings.theme {
+                    ThemeMode::Dark => ThemeMode::Light,
+                    ThemeMode::Light => ThemeMode::Dark,
+                };
+                self.settings.save();
+                self.apply_theme(ctx);
+            }
+            Command::ToggleSideBySide => {
+                self.settings.side_by_side = !self.settings.side_by_side;
+                self.settings.save();
+            }
+            Command::ToggleIgnoreWhitespace => {
+                self.settings.ignore_whitespace = !self.settings.ignore_whitespace;
+                self.settings.save();
+                let s = self.settings.clone();
+                self.tabs[self.active].reload_diffs(&s);
+            }
+            Command::GoToTab(i) => {
+                if i < self.tabs.len() {
+                    self.active = i;
+                }
+            }
+            Command::OpenRecent(p) => app_acts.push(AppAct::OpenPath(p)),
+            other => {
+                let tab = &mut self.tabs[self.active];
+                let path = tab.repo.as_ref().map(|r| r.path.clone());
+                match other {
+                    Command::Fetch => tab_acts.push(Act::Send(Request::Fetch)),
+                    Command::Pull => tab_acts.push(Act::Send(Request::Pull)),
+                    Command::Push => tab_acts.push(Act::Send(Request::Push { force: false })),
+                    Command::ForcePush => tab_acts.push(Act::Dialog(Dialog::Confirm {
+                        title: "Force push".into(),
+                        text: "Overwrite the remote branch with your local branch? The push is refused if \
+                               someone else pushed in the meantime (--force-with-lease)."
+                            .into(),
+                        button: "Force push".into(),
+                        req: Some(Request::Push { force: true }),
+                    })),
+                    Command::Refresh => tab_acts.push(Act::Send(Request::Refresh)),
+                    Command::Commit => tab_acts.push(Act::OpenCommit),
+                    Command::Stash => tab_acts.push(Act::Dialog(Dialog::Input {
+                        title: "Stash changes".into(),
+                        label: "Message (optional)".into(),
+                        value: String::new(),
+                        kind: InputKind::Stash,
+                        check: Some(("Include untracked files".into(), true)),
+                    })),
+                    Command::NewBranch => tab_acts.push(Act::Dialog(Dialog::Input {
+                        title: "New branch".into(),
+                        label: "Branch name".into(),
+                        value: String::new(),
+                        kind: InputKind::NewBranch,
+                        check: None,
+                    })),
+                    Command::SearchCommits => tab.focus_search = true,
+                    Command::Reflog => tab_acts.push(Act::ShowReflog),
+                    Command::RepoSettings => tab_acts.push(Act::OpenRepoSettings),
+                    Command::UpdateSubmodules => tab_acts.push(Act::Send(Request::SubmoduleSync {
+                        path: None,
+                        remote: false,
+                    })),
+                    Command::AddWorktree => tab_acts.push(Act::Dialog(Dialog::AddWorktree {
+                        path: String::new(),
+                        branch: String::new(),
+                        create: true,
+                    })),
+                    Command::TrackLfs => tab_acts.push(Act::Dialog(Dialog::TrackLfs {
+                        pattern: String::new(),
+                    })),
+                    Command::OpenExplorer => app_acts.extend(path.map(AppAct::Explorer)),
+                    Command::OpenTerminal => app_acts.extend(path.map(AppAct::Terminal)),
+                    Command::OpenEditor => app_acts.extend(path.map(AppAct::Editor)),
+                    Command::ContinueOperation => tab_acts.push(Act::Send(Request::OpContinue)),
+                    Command::AbortOperation => tab_acts.push(Act::Dialog(Dialog::Confirm {
+                        title: "Abort the operation".into(),
+                        text: "Abort and return to the state before the operation started?".into(),
+                        button: "Abort".into(),
+                        req: Some(Request::OpAbort),
+                    })),
+                    Command::ShowFiles => tab.sidebar_files = true,
+                    Command::ShowRefs => tab.sidebar_files = false,
+                    Command::Checkout(name) => {
+                        let b = tab
+                            .repo
+                            .as_ref()
+                            .and_then(|r| r.branches.iter().find(|b| !b.is_remote && b.name == name))
+                            .cloned();
+                        if let Some(b) = b {
+                            tab_acts.push(Act::Send(Request::Checkout(b)));
+                        }
+                    }
+                    _ => {}
+                }
+                app_acts.extend(tab.apply(tab_acts));
+            }
+        }
+    }
+
+    /// The Ctrl+K palette window.
+    fn palette_ui(&mut self, ctx: &egui::Context, app_acts: &mut Vec<AppAct>) {
+        let Some(st) = self.palette.as_mut() else { return };
+        let tab = &self.tabs[self.active];
+        let has_repo = tab.repo.is_some();
+        let branches: Vec<String> = tab
+            .repo
+            .as_ref()
+            .map(|r| {
+                r.branches
+                    .iter()
+                    .filter(|b| !b.is_remote)
+                    .map(|b| b.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let tabs: Vec<String> = self.tabs.iter().map(|t| t.title.clone()).collect();
+        let entries = commands::entries(&branches, self.recent.paths(), &tabs);
+
+        let (up, down, enter, esc) = ctx.input_mut(|i| {
             (
-                i.consume_key(Modifiers::COMMAND, Key::O),
-                i.consume_key(Modifiers::COMMAND, Key::T),
-                i.consume_key(Modifiers::COMMAND, Key::W),
-                i.consume_key(Modifiers::COMMAND, Key::Comma),
-                i.consume_key(Modifiers::COMMAND, Key::F),
-                i.consume_key(Modifiers::NONE, Key::F5),
-                i.consume_key(Modifiers::CTRL, Key::Tab),
+                i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                i.consume_key(Modifiers::NONE, Key::Enter),
                 i.consume_key(Modifiers::NONE, Key::Escape),
             )
         });
+        if esc {
+            self.palette = None;
+            return;
+        }
+        let before = st.query.clone();
+        let mut chosen: Option<Command> = None;
+        egui::Area::new(egui::Id::unique("palette"))
+            .order(egui::Order::Foreground)
+            .anchor(Align2::CENTER_TOP, vec2(0.0, 70.0))
+            .show(ctx, |ui| {
+                Frame::popup(ui.style())
+                    .inner_margin(Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.set_width(560.0);
+                        let te = ui.add(
+                            egui::TextEdit::singleline(&mut st.query)
+                                .hint_text("Type a command, a branch or a repository…")
+                                .desired_width(f32::INFINITY)
+                                .margin(Margin::symmetric(8, 6)),
+                        );
+                        te.request_focus();
+                        if st.query != before {
+                            st.selected = 0;
+                        }
+                        let ranked = commands::filter(&entries, &st.query, has_repo);
+                        if down {
+                            st.selected = (st.selected + 1).min(ranked.len().saturating_sub(1));
+                        }
+                        if up {
+                            st.selected = st.selected.saturating_sub(1);
+                        }
+                        st.selected = st.selected.min(ranked.len().saturating_sub(1));
+                        ui.add_space(6.0);
+                        if ranked.is_empty() {
+                            ui.label(RichText::new("Nothing matches.").color(text_weak()));
+                        }
+                        egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+                            for (pos, &idx) in ranked.iter().take(60).enumerate() {
+                                let en = &entries[idx];
+                                let (rect, resp) =
+                                    ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+                                let active = pos == st.selected;
+                                if active {
+                                    ui.painter().rect_filled(rect, 4.0, accent().gamma_multiply(0.22));
+                                    ui.scroll_to_rect(rect, None);
+                                } else if resp.hovered() {
+                                    ui.painter().rect_filled(rect, 4.0, bg_btn());
+                                }
+                                ui.painter().text(
+                                    pos2(rect.left() + 8.0, rect.center().y),
+                                    Align2::LEFT_CENTER,
+                                    &en.title,
+                                    FontId::proportional(13.5),
+                                    text(),
+                                );
+                                if !en.hint.is_empty() {
+                                    ui.painter().text(
+                                        pos2(rect.right() - 8.0, rect.center().y),
+                                        Align2::RIGHT_CENTER,
+                                        &en.hint,
+                                        FontId::proportional(11.5),
+                                        text_weak(),
+                                    );
+                                }
+                                if resp.clicked() {
+                                    chosen = Some(en.command.clone());
+                                }
+                            }
+                        });
+                        if enter && let Some(&idx) = ranked.get(st.selected) {
+                            chosen = Some(entries[idx].command.clone());
+                        }
+                    });
+            });
+        if let Some(cmd) = chosen {
+            self.palette = None;
+            self.run_command(ctx, cmd, app_acts);
+        }
+    }
+
+    fn shortcuts(&mut self, ctx: &egui::Context, acts: &mut Vec<AppAct>) {
+        let (open, new_tab, close_tab, settings, find, refresh, next_tab, esc, palette) =
+            ctx.input_mut(|i| {
+                (
+                    i.consume_key(Modifiers::COMMAND, Key::O),
+                    i.consume_key(Modifiers::COMMAND, Key::T),
+                    i.consume_key(Modifiers::COMMAND, Key::W),
+                    i.consume_key(Modifiers::COMMAND, Key::Comma),
+                    i.consume_key(Modifiers::COMMAND, Key::F),
+                    i.consume_key(Modifiers::NONE, Key::F5),
+                    i.consume_key(Modifiers::CTRL, Key::Tab),
+                    i.consume_key(Modifiers::NONE, Key::Escape),
+                    i.consume_key(Modifiers::COMMAND, Key::K),
+                )
+            });
+        if palette {
+            self.palette = Some(PaletteState {
+                query: String::new(),
+                selected: 0,
+            });
+        }
+        // While the palette is open it owns Escape and the arrow keys.
+        if self.palette.is_some() {
+            return;
+        }
         if open && let Some(dir) = rfd::FileDialog::new().pick_folder() {
             acts.push(AppAct::OpenPath(dir));
         }
@@ -549,7 +798,11 @@ impl App {
                     (Some(i), false) => (i + 1).min(n - 1),
                 };
                 if tab.selected != Some(idx) {
-                    acts.extend(tab.apply(vec![Act::SelectCommit { idx, ctrl: false }]));
+                    acts.extend(tab.apply(vec![Act::SelectCommit {
+                        idx,
+                        ctrl: false,
+                        shift: false,
+                    }]));
                 }
             }
         }
@@ -672,6 +925,7 @@ impl App {
             let has_repo = self.tabs[self.active].repo.is_some();
             let mut save_identity = false;
             let mut check_now = false;
+            let mut watch_changed = false;
             egui::Window::new(bold("Settings", 15.0))
                 .open(&mut open)
                 .collapsible(false)
@@ -733,6 +987,14 @@ impl App {
                             .add(egui::DragValue::new(&mut s.context).range(0..=30))
                             .changed();
                     });
+
+                    section_label(ui, "Files");
+                    if ui
+                        .checkbox(&mut s.watch_files, "Reload automatically when files change on disk")
+                        .changed()
+                    {
+                        watch_changed = true;
+                    }
 
                     section_label(ui, "Remote");
                     ui.horizontal(|ui| {
@@ -821,6 +1083,12 @@ impl App {
                 });
             if check_now {
                 self.spawn_check(ctx);
+            }
+            if watch_changed {
+                self.settings.save();
+                for t in &mut self.tabs {
+                    t.set_watching(&self.settings);
+                }
             }
             if save_identity {
                 let (name, email) = (
@@ -1046,6 +1314,8 @@ impl eframe::App for App {
             }
             tab.dialogs(&ctx, &mut acts);
             tab.info_windows(&ctx, &mut acts);
+            tab.viewer_window(&ctx, &mut acts, &self.settings);
+            tab.repo_settings_window(&ctx, &mut acts);
 
             let reload = acts.iter().any(|a| matches!(a, Act::ReloadView));
             app_acts.extend(tab.apply(acts));
@@ -1055,6 +1325,7 @@ impl eframe::App for App {
         }
         self.windows(&ctx, &mut app_acts);
         self.update_window(&ctx);
+        self.palette_ui(&ctx, &mut app_acts);
         self.handle(&ctx, app_acts);
     }
 
