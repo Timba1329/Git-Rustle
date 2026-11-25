@@ -2,7 +2,7 @@ use crate::error::{GitError, Result};
 use crate::model::{FileChange, Status};
 
 fn lossy(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).into_owned()
+    crate::pathenc::decode_path(b)
 }
 
 fn bad(line: &str) -> GitError {

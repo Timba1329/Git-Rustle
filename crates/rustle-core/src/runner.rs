@@ -39,6 +39,8 @@ pub struct RunOpts<'a> {
     /// Never ask the user for anything: drop the askpass helpers and tell credential managers
     /// not to show UI. Used for background work, which must fail quietly instead of prompting.
     pub non_interactive: bool,
+    /// Treat exit codes `0..=max` as success (e.g. `git merge-file` returns the number of conflicts).
+    pub max_ok_exit: Option<i32>,
 }
 
 /// Thin wrapper around `git` with safe defaults for GUI use.
@@ -192,7 +194,10 @@ impl GitRunner {
             }
         };
 
-        if out.status.success() {
+        let ok_code = opts
+            .max_ok_exit
+            .is_some_and(|m| out.status.code().is_some_and(|c| (0..=m).contains(&c)));
+        if out.status.success() || ok_code {
             Ok(out)
         } else {
             Err(GitError::Failed {

@@ -249,3 +249,56 @@ impl LogQuery {
         self.text.is_some() || self.author.is_some() || self.path.is_some()
     }
 }
+
+/// A configured remote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remote {
+    pub name: String,
+    pub fetch_url: String,
+    pub push_url: String,
+}
+
+/// Result of `git log --format=%G?`: `G` good, `B` bad, `U` good but untrusted, `X`/`Y`/`R` expired or
+/// revoked, `E` cannot be checked, `N` not signed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureInfo {
+    pub status: char,
+    pub signer: String,
+}
+
+/// A value from the git configuration together with the scope it comes from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigValue {
+    pub value: Option<String>,
+    /// `system`, `global`, `local`, `worktree` or `command`.
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrepHit {
+    pub path: String,
+    pub line: u32,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worktree {
+    pub path: String,
+    pub head: String,
+    /// Short branch name; `None` for a detached HEAD.
+    pub branch: Option<String>,
+    pub is_main: bool,
+    pub locked: bool,
+    pub prunable: bool,
+}
+
+/// Git LFS usage of a repository.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LfsInfo {
+    /// The `git lfs` command is installed.
+    pub available: bool,
+    /// Patterns tracked through `.gitattributes`.
+    pub patterns: Vec<String>,
+    /// Files currently stored in LFS.
+    pub files: std::collections::HashSet<String>,
+}

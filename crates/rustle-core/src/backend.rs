@@ -6,15 +6,16 @@ use crate::model::{
 };
 use crate::parse::log::{LOG_FORMAT, parse_log};
 use crate::parse::status::parse_status;
+use crate::pathenc::{decode_path, encode_path};
 use crate::runner::{CancelToken, GitRunner, RunOpts};
 use std::path::{Path, PathBuf};
 
 const MAX_DIFF_BYTES: usize = 1_000_000;
 
 pub struct CliBackend {
-    runner: GitRunner,
-    repo: PathBuf,
-    git_dir: PathBuf,
+    pub(crate) runner: GitRunner,
+    pub(crate) repo: PathBuf,
+    pub(crate) git_dir: PathBuf,
 }
 
 fn lossy(b: &[u8]) -> String {
@@ -31,10 +32,11 @@ fn text(bytes: &[u8]) -> String {
     }
 }
 
-fn with_paths(mut base: Vec<String>, paths: &[String]) -> Vec<String> {
-    base.push("--".into());
-    base.extend(paths.iter().cloned());
-    base
+fn with_paths(base: Vec<String>, paths: &[String]) -> Vec<std::ffi::OsString> {
+    let mut v: Vec<std::ffi::OsString> = base.into_iter().map(Into::into).collect();
+    v.push("--".into());
+    v.extend(paths.iter().map(|p| encode_path(p)));
+    v
 }
 
 fn strs(v: &[&str]) -> Vec<String> {
@@ -120,7 +122,7 @@ impl CliBackend {
         self.runner.run(args, Some(&self.repo))
     }
 
-    fn git_cancel<S: AsRef<std::ffi::OsStr>>(
+    pub(crate) fn git_cancel<S: AsRef<std::ffi::OsStr>>(
         &self,
         args: &[S],
         cancel: Option<&CancelToken>,
@@ -135,18 +137,18 @@ impl CliBackend {
         )
     }
 
-    fn has_head(&self) -> bool {
+    pub(crate) fn has_head(&self) -> bool {
         self.git(&["rev-parse", "--verify", "-q", "HEAD"]).is_ok()
     }
 
-    fn has_conflicts(&self) -> bool {
+    pub(crate) fn has_conflicts(&self) -> bool {
         self.status()
             .map(|s| s.files.iter().any(|f| f.conflicted))
             .unwrap_or(false)
     }
 
     /// Maps a failure caused by merge conflicts to `Ok(Conflicts)`.
-    fn finish(&self, r: Result<std::process::Output>) -> Result<OpResult> {
+    pub(crate) fn finish(&self, r: Result<std::process::Output>) -> Result<OpResult> {
         match r {
             Ok(_) => Ok(OpResult::Done),
             Err(GitError::Failed { .. }) if self.has_conflicts() => Ok(OpResult::Conflicts),
@@ -310,7 +312,7 @@ impl CliBackend {
 
     pub fn file_diff(&self, change: &FileChange, staged: bool, opts: DiffOpts) -> Result<String> {
         if change.is_untracked() {
-            let bytes = std::fs::read(self.repo.join(&change.path))?;
+            let bytes = std::fs::read(self.repo.join(encode_path(&change.path)))?;
             if bytes.contains(&0) {
                 return Ok("(binary file)".to_string());
             }
@@ -340,7 +342,7 @@ impl CliBackend {
         let toks: Vec<String> = out
             .split(|&b| b == 0)
             .filter(|t| !t.is_empty())
-            .map(lossy)
+            .map(decode_path)
             .collect();
         let mut files = Vec::new();
         let mut i = 0;
@@ -681,7 +683,7 @@ impl CliBackend {
         Ok(())
     }
 
-    fn first_remote(&self) -> Result<String> {
+    pub(crate) fn first_remote(&self) -> Result<String> {
         let out = self.git(&["remote"])?;
         lossy(&out.stdout)
             .lines()
