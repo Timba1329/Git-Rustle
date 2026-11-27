@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0
+
+- Menu bar (File, Repository, View, Help) with every action and the settings.
+- Graph: go to HEAD, jump to a commit by hash, j/k and arrow keys, date and author filters,
+  "show only this branch", parents and containing branches in the commit details.
+- Branches: compare two branches, preview a merge, delete merged branches (local and remote),
+  open a pull request on GitHub/GitLab, undo the last action, stash and re-apply when a checkout
+  is blocked by local changes.
+- Commits: fold staged changes into an older commit (fixup), guided bisect, export and apply patches,
+  ticket prefix from the branch name, stash preview, external merge tool for conflicts.
+- Tools: repository dashboard (stale branches, largest files), git hooks manager, tag annotations,
+  delete remote tags, stop tracking a file, fetch/pull all open repositories.
+- F3 / Shift+F3 jumps between changes in a diff; toasts for results; per-tab status (changes,
+  ahead/behind); optional "follow Windows" light/dark theme.
+- Commit window: clearer sections, boxed file lists, wider layout.
+
 ## 0.3.1
 
 - Commit details: file filter, expand/collapse all folders, folder tree layout fix.
