@@ -243,6 +243,8 @@ pub struct LogQuery {
     /// `--since` / `--until` dates (anything git understands, e.g. 2026-11-01).
     pub since: Option<String>,
     pub until: Option<String>,
+    /// Only commits that add or remove this text (`git log -S`).
+    pub pickaxe: Option<String>,
 }
 
 impl LogQuery {
@@ -260,6 +262,7 @@ impl LogQuery {
             || self.path.is_some()
             || self.since.is_some()
             || self.until.is_some()
+            || self.pickaxe.is_some()
     }
 }
 
@@ -334,4 +337,14 @@ pub struct Dashboard {
     pub stale: Vec<BranchAge>,
     /// Largest tracked files: (path, bytes).
     pub big_files: Vec<(String, u64)>,
+    /// Commits per week (oldest first, 12 weeks) for the most active authors.
+    pub authors: Vec<(String, Vec<u32>)>,
+}
+
+/// A safety copy made before a destructive action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupEntry {
+    pub refname: String,
+    pub id: String,
+    pub time: i64,
 }

@@ -16,6 +16,16 @@ pub struct Settings {
     pub theme: ThemeMode,
     /// Follow the Windows light/dark setting.
     pub follow_system: bool,
+    /// Index of the accent color preset (0 = default).
+    pub accent: u8,
+    pub high_contrast: bool,
+    /// Version whose release notes were shown last.
+    pub seen_version: String,
+    /// Ticket tracker URL with `{id}` for the ticket key (empty = no links).
+    pub ticket_url: String,
+    /// Repositories open at exit, and the active tab.
+    pub session: Vec<String>,
+    pub session_active: usize,
     /// UI scale factor (1.0 = default).
     pub font_scale: f32,
     pub pull_mode: PullMode,
@@ -54,6 +64,12 @@ impl Default for Settings {
             git_path: String::new(),
             theme: ThemeMode::Dark,
             follow_system: false,
+            accent: 0,
+            high_contrast: false,
+            seen_version: String::new(),
+            ticket_url: String::new(),
+            session: Vec::new(),
+            session_active: 0,
             font_scale: 1.0,
             pull_mode: PullMode::FfOnly,
             ignore_whitespace: false,
@@ -136,6 +152,12 @@ impl Settings {
                         ThemeMode::Dark
                     }
                 }
+                "accent" => s.accent = v.parse().unwrap_or(0),
+                "high_contrast" => s.high_contrast = v == "1",
+                "seen_version" => s.seen_version = unesc(v),
+                "ticket_url" => s.ticket_url = unesc(v),
+                "session" => s.session.push(unesc(v)),
+                "session_active" => s.session_active = v.parse().unwrap_or(0),
                 "follow_system" => s.follow_system = v == "1",
                 "font_scale" => s.font_scale = v.parse().unwrap_or(1.0f32).clamp(0.7, 1.8),
                 "pull_mode" => {
@@ -185,6 +207,14 @@ impl Settings {
             }
             .into(),
         );
+        put("accent", self.accent.to_string());
+        put("high_contrast", if self.high_contrast { "1" } else { "0" }.into());
+        put("seen_version", esc(&self.seen_version));
+        put("ticket_url", esc(&self.ticket_url));
+        for p in &self.session {
+            put("session", esc(p));
+        }
+        put("session_active", self.session_active.to_string());
         put("follow_system", if self.follow_system { "1" } else { "0" }.into());
         put("font_scale", self.font_scale.to_string());
         put(

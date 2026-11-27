@@ -23,6 +23,10 @@ pub enum Command {
     NewBranch,
     SearchCommits,
     Reflog,
+    Backups,
+    WhatsNew,
+    Shortcuts,
+    GoToCommit(String),
     ApplyPatch,
     Dashboard,
     Hooks,
@@ -65,7 +69,13 @@ fn e(command: Command, title: &str, hint: &str, needs_repo: bool) -> Entry {
 }
 
 /// All commands, plus one entry per local branch, recent repository and open tab.
-pub fn entries(branches: &[String], recent: &[PathBuf], tabs: &[String]) -> Vec<Entry> {
+pub fn entries(
+    branches: &[String],
+    recent: &[PathBuf],
+    tabs: &[String],
+    commits: &[(String, String)],
+    recent_cmds: &[Command],
+) -> Vec<Entry> {
     use Command::*;
     let mut v = vec![
         e(OpenRepository, "Open repository…", "Ctrl+O", false),
@@ -87,6 +97,9 @@ pub fn entries(branches: &[String], recent: &[PathBuf], tabs: &[String]) -> Vec<
         e(NewBranch, "New branch…", "", true),
         e(SearchCommits, "Search commits", "Ctrl+F", true),
         e(Reflog, "Show reflog", "", true),
+        e(Backups, "Backups (restore after a reset or discard)…", "", true),
+        e(WhatsNew, "What's new in this version", "", false),
+        e(Shortcuts, "Keyboard shortcuts", "?", false),
         e(ApplyPatch, "Apply a patch file…", "", true),
         e(Dashboard, "Repository dashboard", "", true),
         e(Hooks, "Manage git hooks…", "", true),
@@ -137,6 +150,21 @@ pub fn entries(branches: &[String], recent: &[PathBuf], tabs: &[String]) -> Vec<
             .enumerate()
             .map(|(i, t)| e(GoToTab(i), &format!("Go to tab: {t}"), "tab", false)),
     );
+    v.extend(
+        commits
+            .iter()
+            .map(|(id, title)| e(GoToCommit(id.clone()), title, "commit", true)),
+    );
+    // Recently used commands first.
+    for cmd in recent_cmds.iter() {
+        if let Some(i) = v.iter().position(|en| en.command == *cmd) {
+            let mut en = v.remove(i);
+            if en.hint.is_empty() {
+                en.hint = "recent".into();
+            }
+            v.insert(0, en);
+        }
+    }
     v
 }
 
@@ -221,7 +249,7 @@ mod tests {
     #[test]
     fn each_word_is_matched_on_its_own() {
         // "set" lines up with the start of "settings", not with the "s" in "repository".
-        let all = entries(&[], &[], &[]);
+        let all = entries(&[], &[], &[], &[], &[]);
         let top = filter(&all, "repo set", true)[0];
         assert_eq!(all[top].command, Command::RepoSettings);
         let top = filter(&all, "force", true)[0];
@@ -242,6 +270,8 @@ mod tests {
             &["main".into(), "feature/x".into()],
             &[PathBuf::from("C:/code/app")],
             &["app".into()],
+            &[],
+            &[],
         );
         let with_repo = filter(&all, "push", true);
         assert_eq!(all[with_repo[0]].command, Command::Push);

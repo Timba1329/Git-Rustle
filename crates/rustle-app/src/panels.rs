@@ -1,6 +1,6 @@
 //! Drawing of the main panels of a tab: header, sidebar, commit graph and commit details.
 
-use crate::branches::{TreeOpen, btree_ui, build_btree, local_branch_row, remote_branch_row};
+use crate::branches::{DirReq, TreeOpen, btree_ui, build_btree, local_branch_row, remote_branch_row};
 use crate::diffview::{self, DiffAction, DiffView, ViewExtras};
 use crate::fmt;
 use crate::imagediff;
@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 const LANE_W: f32 = 12.0;
 const ROW_H: f32 = 26.0;
 
-fn lane_color(i: usize) -> Color32 {
+pub fn lane_color(i: usize) -> Color32 {
     const P: [Color32; 12] = [
         Color32::from_rgb(0x5b, 0x8d, 0xef),
         Color32::from_rgb(0xe5, 0x67, 0x6b),
@@ -96,6 +96,25 @@ pub fn status_icon(p: &egui::Painter, center: egui::Pos2, letter: char) {
             FontId::monospace(12.0),
             color,
         );
+    }
+}
+
+/// A small color hint for the kind of file.
+pub fn ext_color(path: &str) -> Color32 {
+    let lower = path.to_lowercase();
+    if lower.ends_with(".blade.php") {
+        return Color32::from_rgb(0xe8, 0x92, 0x4a);
+    }
+    match lower.rsplit_once('.').map_or("", |(_, e)| e) {
+        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "php" | "go" | "java" | "cs" | "c" | "cpp" | "h"
+        | "rb" | "vue" | "kt" | "swift" => Color32::from_rgb(0x5b, 0x8d, 0xef),
+        "html" | "htm" | "xml" => Color32::from_rgb(0xe8, 0x92, 0x4a),
+        "css" | "scss" | "sass" | "less" => Color32::from_rgb(0xe5, 0x6a, 0x9a),
+        "json" | "yml" | "yaml" | "toml" | "ini" | "env" | "conf" => Color32::from_rgb(0xe0, 0xa8, 0x4f),
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" => Color32::from_rgb(0xa9, 0x8b, 0xdc),
+        "md" | "txt" | "rst" => Color32::from_rgb(0x4d, 0xbf, 0xd0),
+        "sql" => Color32::from_rgb(0x4f, 0xb8, 0x83),
+        _ => Color32::from_rgb(0x7d, 0x85, 0x96),
     }
 }
 
@@ -341,11 +360,14 @@ impl Tab {
                             });
                             ui.separator();
                             egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
-                                for (title, remote) in [("Local branches", false), ("Remote branches", true)] {
+                                for (title, remote) in [("Local branches", false), ("Remote branches", true)]
+                                {
                                     let mut list: Vec<&Branch> =
                                         r.branches.iter().filter(|b| b.is_remote == remote).collect();
                                     if !remote {
-                                        list.sort_by_key(|b| crate::branches::branch_rank(&b.name, &self.pins));
+                                        list.sort_by_key(|b| {
+                                            crate::branches::branch_rank(&b.name, &self.pins)
+                                        });
                                     }
                                     if list.is_empty() {
                                         continue;
@@ -380,7 +402,11 @@ impl Tab {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         let n = st.files.len();
-                        let commit = if n > 0 { format!("Commit  {n}") } else { "Commit".into() };
+                        let commit = if n > 0 {
+                            format!("Commit  {n}")
+                        } else {
+                            "Commit".into()
+                        };
                         if primary_button(ui, &commit, true).clicked() {
                             acts.push(Act::OpenCommit);
                         }
@@ -398,14 +424,7 @@ impl Tab {
                                 }));
                             }
                             if item(ui, "Force push (with lease)…") {
-                                acts.push(Act::Dialog(Dialog::Confirm {
-                                    title: "Force push".into(),
-                                    text: "Overwrite the remote branch with your local branch? The push is \
-                                           refused if someone else pushed in the meantime (--force-with-lease)."
-                                        .into(),
-                                    button: "Force push".into(),
-                                    req: Some(Request::Push { force: true }),
-                                }));
+                                acts.push(Act::Send(Request::ForcePushPreview));
                             }
                             if item(ui, "Reflog…") {
                                 acts.push(Act::ShowReflog);
@@ -518,8 +537,16 @@ impl Tab {
                         if tool_btn(ui, theme::IC_FETCH, "Fetch", 0, &tip, !busy, warn).clicked() {
                             acts.push(Act::Send(Request::Fetch));
                         }
-                        if tool_btn(ui, theme::IC_REFRESH, "Refresh", 0, "Reload the repository", !busy, None)
-                            .clicked()
+                        if tool_btn(
+                            ui,
+                            theme::IC_REFRESH,
+                            "Refresh",
+                            0,
+                            "Reload the repository",
+                            !busy,
+                            None,
+                        )
+                        .clicked()
                         {
                             acts.push(Act::Send(Request::Refresh));
                         }
@@ -645,10 +672,12 @@ impl Tab {
             let key = path.to_string_lossy().to_string();
             if self.pins_for != key {
                 self.pins = crate::branches::load_pins(&path);
+                self.branch_colors = crate::branches::load_colors(&path);
                 self.pins_for = key;
             }
         }
         let pins = self.pins.clone();
+        let colors = self.branch_colors.clone();
         let frame = Frame::new().fill(bg_side()).inner_margin(Margin::symmetric(8, 8));
         egui::Panel::left("sidebar")
             .frame(frame)
@@ -703,8 +732,13 @@ impl Tab {
                         base: true,
                         epoch: self.branch_epoch + if filtering { 1_000_000 } else { 0 },
                         all: if filtering { Some(true) } else { self.branch_all },
+                        remote: false,
                     };
-                    let ropen = TreeOpen { base: false, ..topen };
+                    let ropen = TreeOpen {
+                        base: false,
+                        remote: true,
+                        ..topen
+                    };
                     let matches = |b: &&Branch| q.is_empty() || b.name.to_lowercase().contains(&q);
                     let locals: Vec<&Branch> = r
                         .branches
@@ -724,12 +758,30 @@ impl Tab {
                     if !pinned_list.is_empty() {
                         ui.label(heading("PINNED".into()));
                         for b in &pinned_list {
-                            local_branch_row(ui, b, &b.name, busy, &current, true, acts);
+                            local_branch_row(
+                                ui,
+                                b,
+                                &b.name,
+                                busy,
+                                &current,
+                                true,
+                                colors.get(&b.name).map(|i| lane_color(*i)),
+                                acts,
+                            );
                         }
                         ui.add_space(4.0);
                     }
                     for b in &mains {
-                        local_branch_row(ui, b, &b.name, busy, &current, false, acts);
+                        local_branch_row(
+                            ui,
+                            b,
+                            &b.name,
+                            busy,
+                            &current,
+                            false,
+                            colors.get(&b.name).map(|i| lane_color(*i)),
+                            acts,
+                        );
                     }
                     let rest: Vec<&Branch> = locals
                         .iter()
@@ -737,7 +789,7 @@ impl Tab {
                         .filter(|b| !pins.contains(&b.name) && !mains.iter().any(|m| m.name == b.name))
                         .collect();
                     let tree = build_btree(&rest);
-                    let mut dir_req: Option<String> = None;
+                    let mut dir_req: Option<DirReq> = None;
                     btree_ui(
                         ui,
                         &tree,
@@ -745,11 +797,20 @@ impl Tab {
                         topen,
                         0,
                         &mut |ui, b, label| {
-                            local_branch_row(ui, b, label, busy, &current, false, acts);
+                            local_branch_row(
+                                ui,
+                                b,
+                                label,
+                                busy,
+                                &current,
+                                false,
+                                colors.get(&b.name).map(|i| lane_color(*i)),
+                                acts,
+                            );
                         },
                         Some(&mut dir_req),
                     );
-                    if let Some(folder) = dir_req {
+                    if let Some(DirReq::NewBranch(folder)) = dir_req {
                         acts.push(Act::Dialog(Dialog::Input {
                             title: "New branch".into(),
                             label: "Branch name".into(),
@@ -767,6 +828,7 @@ impl Tab {
                         .collect();
                     if !remotes.is_empty() {
                         ui.add_space(8.0);
+                        let mut rreq: Option<DirReq> = None;
                         egui::CollapsingHeader::new(heading(format!("REMOTES  {}", remotes.len())))
                             .default_open(true)
                             .show(ui, |ui| {
@@ -780,9 +842,14 @@ impl Tab {
                                     &mut |ui, b, label| {
                                         remote_branch_row(ui, b, label, busy, &current, acts);
                                     },
-                                    None,
+                                    Some(&mut rreq),
                                 );
                             });
+                        match rreq {
+                            Some(DirReq::FetchRemote(n)) => acts.push(Act::Send(Request::FetchRemote(n))),
+                            Some(DirReq::PruneRemote(n)) => acts.push(Act::Send(Request::PruneRemote(n))),
+                            _ => {}
+                        }
                     }
                     if !r.tags.is_empty() {
                         egui::CollapsingHeader::new(heading(format!("TAGS  {}", r.tags.len())))
@@ -1130,6 +1197,13 @@ impl Tab {
                         );
                         apply |= enter(&r, ui);
                     }
+                    let pe = ui.add(
+                        egui::TextEdit::singleline(&mut self.pickaxe)
+                            .hint_text("Find in code changes")
+                            .desired_width(150.0)
+                            .margin(Margin::symmetric(6, 3)),
+                    );
+                    apply |= enter(&pe, ui);
                     if ui
                         .checkbox(&mut self.branch_only, "Current branch only")
                         .changed()
@@ -1159,6 +1233,7 @@ impl Tab {
                         || self.branch_only
                         || !self.since.is_empty()
                         || !self.until.is_empty()
+                        || !self.pickaxe.is_empty()
                         || !self.graph_refs.is_empty()
                         || !self.search.is_empty()
                         || !self.author.is_empty();
@@ -1214,6 +1289,30 @@ impl Tab {
             .map(|(_, c)| format!("{}  {}", c.short_id(), c.subject))
             .collect();
         let n = sorted.len();
+        let esc = |t: &str| format!("\"{}\"", t.replace('"', "\"\""));
+        let md: String = self
+            .multi_sorted()
+            .iter()
+            .map(|(_, c)| format!("- `{}` {}\n", c.short_id(), c.subject))
+            .collect();
+        let txt: String = self
+            .multi_sorted()
+            .iter()
+            .map(|(_, c)| format!("{}  {}\n", c.short_id(), c.subject))
+            .collect();
+        let csv: String = self
+            .multi_sorted()
+            .iter()
+            .map(|(_, c)| {
+                format!(
+                    "{},{},{},{}\n",
+                    c.id,
+                    esc(&c.author_name),
+                    fmt::date(c.time, true),
+                    esc(&c.subject)
+                )
+            })
+            .collect();
         egui::Panel::bottom("detail")
             .frame(frame)
             .show_separator_line(true)
@@ -1230,6 +1329,17 @@ impl Tab {
                         .clicked()
                     {
                         acts.push(Act::SquashSelected);
+                    }
+                    if ui.add(small("Copy as markdown")).clicked() {
+                        ui.ctx().copy_text(md.clone());
+                    }
+                    if ui.add(small("Copy as text")).clicked() {
+                        ui.ctx().copy_text(txt.clone());
+                    }
+                    if ui.add(small("Save CSV…")).clicked()
+                        && let Some(path) = rfd::FileDialog::new().set_file_name("commits.csv").save_file()
+                    {
+                        let _ = std::fs::write(path, format!("hash,author,date,subject\n{csv}"));
                     }
                     if ui.add_enabled(!busy, small("Cherry-pick")).clicked() {
                         acts.push(Act::CherryPickSelected);
@@ -1279,7 +1389,17 @@ impl Tab {
             .show(ui, |ui| {
                 if let Some(c) = &commit {
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(bold(&c.subject, 14.5));
+                    ui.horizontal(|ui| {
+                        ui.label(bold(&c.subject, 14.5));
+                        if !settings.ticket_url.is_empty()
+                            && let Some(key) = crate::commit_window::ticket_key(&c.subject)
+                        {
+                            let url = settings.ticket_url.replace("{id}", &key);
+                            if ui.add(small(&format!("{key} ↗"))).on_hover_text(&url).clicked() {
+                                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                            }
+                        }
+                    });
                     let cmp = self
                         .compare_id
                         .as_ref()
@@ -1447,6 +1567,7 @@ impl Tab {
                                         base: true,
                                         epoch: self.cdir_epoch + if q.is_empty() { 0 } else { 1_000_000 },
                                         all: if q.is_empty() { self.cdir_all } else { Some(true) },
+                                        remote: false,
                                     };
                                     let rev = self.selected_id.clone();
                                     commit_tree_ui(
@@ -1625,6 +1746,17 @@ fn commit_tree_ui(
             if ctx_item(ui, "Blame", f.status != 'D') {
                 acts.push(Act::Blame(f.path.clone()));
             }
+            if let Some(rv) = rev
+                && ctx_item(ui, "Open on GitHub / GitLab", true)
+            {
+                acts.push(Act::Send(Request::WebUrl {
+                    target: rustle_core::WebTarget::File {
+                        rev: rv.clone(),
+                        path: f.path.clone(),
+                    },
+                    copy: false,
+                }));
+            }
             if ctx_item(ui, "Copy path", true) {
                 ui.ctx().copy_text(f.path.clone());
             }
@@ -1642,6 +1774,7 @@ fn commit_file_row(ui: &mut Ui, f: &CommitFile, selected: bool, name_only: Optio
     }
     let cy = rect.center().y;
     status_icon(&p, pos2(rect.left() + 10.0, cy), f.status);
+    p.circle_filled(pos2(rect.left() + 25.0, cy), 3.0, ext_color(&f.path));
     let (dir, name) = match (name_only, f.path.rsplit_once('/')) {
         (Some(n), _) => (String::new(), n),
         (None, Some((d, n))) => (format!("{d}/"), n),
@@ -1650,7 +1783,7 @@ fn commit_file_row(ui: &mut Ui, f: &CommitFile, selected: bool, name_only: Optio
     paint_counts(&p, rect, f.added, f.deleted);
     let tp = p.with_clip_rect(rect.with_max_x(rect.right() - 70.0));
     let g = tp.layout_no_wrap(name.to_string(), FontId::proportional(13.0), text());
-    let x = rect.left() + 24.0;
+    let x = rect.left() + 34.0;
     let w = g.size().x;
     tp.galley(pos2(x, cy - g.size().y / 2.0), g, text());
     if !dir.is_empty() {
@@ -1901,6 +2034,22 @@ fn commit_row(
                 check: Some(("Switch to the new branch".into(), true)),
             }));
         }
+        if ctx_item(ui, "Copy hash", true) {
+            ui.ctx().copy_text(id.clone());
+        }
+        if ctx_item(ui, "Open on GitHub / GitLab", true) {
+            acts.push(Act::Send(Request::WebUrl {
+                target: rustle_core::WebTarget::Commit(id.clone()),
+                copy: false,
+            }));
+        }
+        if ctx_item(ui, "Copy link", true) {
+            acts.push(Act::Send(Request::WebUrl {
+                target: rustle_core::WebTarget::Commit(id.clone()),
+                copy: true,
+            }));
+        }
+        ui.separator();
         if ctx_item(ui, "Fold staged changes into this commit (fixup)…", has_staged) {
             acts.push(Act::Dialog(Dialog::Confirm {
                 title: "Fixup".into(),

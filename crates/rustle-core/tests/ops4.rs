@@ -249,3 +249,136 @@ fn log_can_be_limited_by_date() {
     };
     assert_eq!(b.log_query(&q).unwrap().len(), 1);
 }
+
+#[test]
+fn rebase_preview_reports_conflicts_without_touching_the_repo() {
+    let d = tempfile::tempdir().unwrap();
+    init(d.path());
+    commit_file(d.path(), "f.txt", "base\n", "base");
+    git(d.path(), &["checkout", "-q", "-b", "feature"]);
+    commit_file(d.path(), "f.txt", "feature\n", "feature change");
+    git(d.path(), &["checkout", "-q", "main"]);
+    commit_file(d.path(), "f.txt", "main\n", "main change");
+    git(d.path(), &["checkout", "-q", "feature"]);
+    git(d.path(), &["branch", "clean-target", "main~1"]);
+
+    let b = open(d.path());
+    let (n, conflicts) = b.rebase_preview("main").unwrap();
+    assert_eq!((n, conflicts), (1, vec!["f.txt".to_string()]));
+    let (_, clean) = b.rebase_preview("clean-target").unwrap();
+    assert!(clean.is_empty());
+    // nothing left behind
+    assert_eq!(git(d.path(), &["branch", "--show-current"]).trim(), "feature");
+    assert!(git(d.path(), &["status", "--porcelain"]).trim().is_empty());
+    assert_eq!(git(d.path(), &["worktree", "list"]).lines().count(), 1);
+}
+
+#[test]
+fn backups_save_and_restore_changes_and_head() {
+    let d = tempfile::tempdir().unwrap();
+    init(d.path());
+    commit_file(d.path(), "a.txt", "1\n", "first");
+    std::fs::write(d.path().join("a.txt"), "1\nwork in progress\n").unwrap();
+    let b = open(d.path());
+    b.backup("reset").unwrap();
+    git(d.path(), &["reset", "-q", "--hard"]);
+    assert_eq!(
+        std::fs::read_to_string(d.path().join("a.txt")).unwrap().trim(),
+        "1"
+    );
+
+    let list = b.backups().unwrap();
+    assert_eq!(list.len(), 2);
+    let work = list.iter().find(|e| e.refname.ends_with("-work")).unwrap();
+    b.restore_backup(&work.refname).unwrap();
+    assert!(
+        std::fs::read_to_string(d.path().join("a.txt"))
+            .unwrap()
+            .contains("work in progress")
+    );
+
+    let head = list.iter().find(|e| e.refname.ends_with("-head")).unwrap();
+    assert!(
+        b.restore_backup(&head.refname)
+            .unwrap()
+            .starts_with("Created branch")
+    );
+    for e in &list {
+        b.delete_backup(&e.refname).unwrap();
+    }
+    assert!(b.backups().unwrap().is_empty());
+}
+
+#[test]
+fn check_commit_flags_secrets_and_force_push_lists_lost_commits() {
+    let d = tempfile::tempdir().unwrap();
+    init(d.path());
+    commit_file(d.path(), "a.txt", "1\n", "first");
+    std::fs::write(d.path().join(".env"), "DB_PASSWORD=supersecret123\n").unwrap();
+    std::fs::write(d.path().join("ok.txt"), "nothing here\n").unwrap();
+    git(d.path(), &["add", "-A"]);
+    let b = open(d.path());
+    let findings = b.check_commit().unwrap();
+    assert!(findings.iter().any(|f| f.starts_with(".env:")), "{findings:?}");
+    assert!(!findings.iter().any(|f| f.starts_with("ok.txt")));
+
+    // an upstream that is ahead: a force push would lose its commit
+    git(d.path(), &["reset", "-q"]);
+    let (_, remote) = {
+        let root = d.path().join("remote.git");
+        git(d.path(), &["init", "-q", "--bare", root.to_str().unwrap()]);
+        ((), root)
+    };
+    git(d.path(), &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(d.path(), &["push", "-q", "-u", "origin", "main"]);
+    commit_file(d.path(), "b.txt", "2\n", "second");
+    git(d.path(), &["push", "-q"]);
+    git(d.path(), &["reset", "-q", "--hard", "HEAD~1"]);
+    let lost = b.force_push_lost();
+    assert_eq!(lost.len(), 1);
+    assert_eq!(lost[0].subject, "second");
+}
+
+#[test]
+fn web_urls_and_range_files() {
+    let d = tempfile::tempdir().unwrap();
+    init(d.path());
+    commit_file(d.path(), "a.txt", "1\n", "first");
+    git(d.path(), &["checkout", "-q", "-b", "feature"]);
+    commit_file(d.path(), "b.txt", "2\n", "feature work");
+    git(d.path(), &["checkout", "-q", "main"]);
+    commit_file(d.path(), "c.txt", "3\n", "main work");
+    let b = open(d.path());
+
+    git(
+        d.path(),
+        &["remote", "add", "origin", "https://github.com/o/r.git"],
+    );
+    use rustle_core::WebTarget::*;
+    assert_eq!(
+        b.web_url(&Commit("abc".into())).unwrap(),
+        "https://github.com/o/r/commit/abc"
+    );
+    assert_eq!(
+        b.web_url(&Branch("x/y".into())).unwrap(),
+        "https://github.com/o/r/tree/x/y"
+    );
+    assert_eq!(
+        b.web_url(&File {
+            rev: "abc".into(),
+            path: "s/m.rs".into()
+        })
+        .unwrap(),
+        "https://github.com/o/r/blob/abc/s/m.rs"
+    );
+
+    // three dots: only what the branch added since the merge base
+    let files = b.range_files("main", "feature", true).unwrap();
+    assert_eq!(
+        files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+        ["b.txt"]
+    );
+    let all = b.range_files("main", "feature", false).unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(b.default_base().as_deref(), Some("main"));
+}

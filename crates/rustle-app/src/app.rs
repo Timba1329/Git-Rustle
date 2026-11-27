@@ -56,6 +56,70 @@ struct PaletteState {
 struct CloneState {
     url: String,
     dest: String,
+    partial: bool,
+}
+
+const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
+
+const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "General",
+        &[
+            ("Ctrl+K", "Command palette (actions, branches, commits)"),
+            ("Ctrl+O", "Open a repository"),
+            ("Ctrl+T / Ctrl+W", "New tab / close tab"),
+            ("Ctrl+Tab", "Next tab"),
+            ("Ctrl+,", "Settings"),
+            ("F5", "Refresh"),
+            ("Ctrl+F", "Search commits"),
+            ("?", "This overview"),
+        ],
+    ),
+    (
+        "Commit graph",
+        &[
+            ("↑ ↓  or  j k", "Previous / next commit"),
+            ("Ctrl+click, Shift+click", "Select several commits"),
+            (
+                "Enter in the search box",
+                "Search; a commit hash jumps to that commit",
+            ),
+        ],
+    ),
+    ("Diffs", &[("F3 / Shift+F3", "Next / previous change")]),
+    (
+        "Commit window",
+        &[
+            ("Ctrl+Enter", "Commit"),
+            ("Space", "Stage or unstage the selected file, then go to the next"),
+            ("↑ ↓", "Previous / next file"),
+        ],
+    ),
+];
+
+/// The release notes of one version from CHANGELOG.md.
+fn changelog_section(version: &str) -> String {
+    let header = format!("## {version}");
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in CHANGELOG.lines() {
+        if line.starts_with("## ") {
+            if inside {
+                break;
+            }
+            inside = line.trim() == header;
+            continue;
+        }
+        if inside {
+            out.push(line);
+        }
+    }
+    let text = out.join("\n").trim().to_string();
+    if text.is_empty() {
+        "No release notes for this version.".into()
+    } else {
+        text
+    }
 }
 
 pub struct App {
@@ -67,6 +131,9 @@ pub struct App {
     show_about: bool,
     clone: Option<CloneState>,
     palette: Option<PaletteState>,
+    recent_cmds: Vec<Command>,
+    show_shortcuts: bool,
+    whatsnew: Option<String>,
     ident_name: String,
     ident_email: String,
     ident_wait: bool,
@@ -154,26 +221,71 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install_fonts(&cc.egui_ctx);
         let settings = Settings::load();
+        theme::set_look(settings.accent, settings.high_contrast);
         theme::apply(&cc.egui_ctx, settings.theme, settings.font_scale);
         let recent = Recent::load();
+        let mut settings = settings;
+        let current_version = env!("CARGO_PKG_VERSION");
+        let whatsnew = (!settings.seen_version.is_empty() && settings.seen_version != current_version)
+            .then(|| changelog_section(current_version));
+        if settings.seen_version != current_version {
+            settings.seen_version = current_version.into();
+            settings.save();
+        }
 
         let mut first = Tab::new(&cc.egui_ctx, &settings);
-        // `rustle <path>` opens that repository; otherwise reopen the most recent one.
-        let start = std::env::args_os()
-            .nth(1)
-            .map(PathBuf::from)
-            .or_else(|| recent.paths().first().cloned());
+        // `rustle <path>` opens that repository; `--commit` also opens the commit window. Without a
+        // path the tabs of the last session come back, or else the most recent repository.
+        let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        let want_commit = args.iter().any(|a| a == "--commit");
+        let cli_path = args
+            .iter()
+            .find(|a| !a.to_string_lossy().starts_with("--"))
+            .map(PathBuf::from);
+        let cli_given = cli_path.is_some();
+        let mut session: Vec<PathBuf> = if cli_given {
+            Vec::new()
+        } else {
+            settings
+                .session
+                .iter()
+                .map(PathBuf::from)
+                .filter(|p| p.exists())
+                .collect()
+        };
+        let start = cli_path.or_else(|| {
+            if session.is_empty() {
+                recent.paths().first().cloned()
+            } else {
+                Some(session.remove(0))
+            }
+        });
         if let Some(p) = start {
             first.open_path(p);
         }
+        first.commit_open = want_commit;
+        let mut tabs = vec![first];
+        for p in session {
+            let mut t = Tab::new(&cc.egui_ctx, &settings);
+            t.open_path(p);
+            tabs.push(t);
+        }
+        let active = if cli_given {
+            0
+        } else {
+            settings.session_active.min(tabs.len() - 1)
+        };
 
         let (update_tx, update_rx) = channel();
 
         let mut app = Self {
-            tabs: vec![first],
-            active: 0,
+            tabs,
+            active,
             settings,
             recent,
+            recent_cmds: Vec::new(),
+            show_shortcuts: false,
+            whatsnew,
             show_settings: false,
             show_about: false,
             clone: None,
@@ -455,6 +567,7 @@ impl App {
                             .and_then(|p| p.parent())
                             .map(|p| p.display().to_string())
                             .unwrap_or_default(),
+                        partial: false,
                     });
                 }
                 AppAct::PickAndInit => {
@@ -477,6 +590,66 @@ impl App {
         }
     }
 
+    /// Remembers the open repositories so the next start can restore the tabs.
+    fn save_session(&mut self) {
+        let cur: Vec<String> = self
+            .tabs
+            .iter()
+            .filter_map(|t| t.repo.as_ref().map(|r| r.path.to_string_lossy().into_owned()))
+            .collect();
+        let active = self.tabs[..self.active.min(self.tabs.len())]
+            .iter()
+            .filter(|t| t.repo.is_some())
+            .count();
+        if !cur.is_empty() && (cur != self.settings.session || active != self.settings.session_active) {
+            self.settings.session = cur;
+            self.settings.session_active = active;
+            self.settings.save();
+        }
+    }
+
+    fn info_windows(&mut self, ctx: &egui::Context) {
+        if self.show_shortcuts {
+            let mut open = true;
+            egui::Window::new(bold("Keyboard shortcuts", 15.0))
+                .open(&mut open)
+                .collapsible(false)
+                .default_width(480.0)
+                .show(ctx, |ui| {
+                    for (section, rows) in SHORTCUTS {
+                        section_label(ui, section);
+                        for (key, what) in *rows {
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    [170.0, 18.0],
+                                    egui::Label::new(RichText::new(*key).monospace().color(accent())),
+                                );
+                                ui.label(*what);
+                            });
+                        }
+                    }
+                });
+            if !open {
+                self.show_shortcuts = false;
+            }
+        }
+        if let Some(text) = self.whatsnew.clone() {
+            let mut open = true;
+            egui::Window::new(bold(format!("What's new in {}", env!("CARGO_PKG_VERSION")), 15.0))
+                .open(&mut open)
+                .collapsible(false)
+                .default_size([520.0, 360.0])
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                        ui.label(text);
+                    });
+                });
+            if !open {
+                self.whatsnew = None;
+            }
+        }
+    }
+
     fn open_settings(&mut self) {
         self.show_settings = true;
         if self.tabs[self.active].repo.is_some() {
@@ -487,6 +660,7 @@ impl App {
     }
 
     fn apply_theme(&mut self, ctx: &egui::Context) {
+        theme::set_look(self.settings.accent, self.settings.high_contrast);
         theme::apply(ctx, self.settings.theme, self.settings.font_scale);
         for t in &mut self.tabs {
             t.reload_diffs(&self.settings);
@@ -540,6 +714,8 @@ impl App {
                 }
             }
             Command::OpenRecent(p) => app_acts.push(AppAct::OpenPath(p)),
+            Command::WhatsNew => self.whatsnew = Some(changelog_section(env!("CARGO_PKG_VERSION"))),
+            Command::Shortcuts => self.show_shortcuts = true,
             Command::FetchAll => {
                 for t in &mut self.tabs {
                     if t.repo.is_some() {
@@ -561,14 +737,7 @@ impl App {
                     Command::Fetch => tab_acts.push(Act::Send(Request::Fetch)),
                     Command::Pull => tab_acts.push(Act::Send(Request::Pull)),
                     Command::Push => tab_acts.push(Act::Send(Request::Push { force: false })),
-                    Command::ForcePush => tab_acts.push(Act::Dialog(Dialog::Confirm {
-                        title: "Force push".into(),
-                        text: "Overwrite the remote branch with your local branch? The push is refused if \
-                               someone else pushed in the meantime (--force-with-lease)."
-                            .into(),
-                        button: "Force push".into(),
-                        req: Some(Request::Push { force: true }),
-                    })),
+                    Command::ForcePush => tab_acts.push(Act::Send(Request::ForcePushPreview)),
                     Command::Refresh => tab_acts.push(Act::Send(Request::Refresh)),
                     Command::Commit => tab_acts.push(Act::OpenCommit),
                     Command::Stash => tab_acts.push(Act::Dialog(Dialog::Input {
@@ -587,6 +756,8 @@ impl App {
                     })),
                     Command::SearchCommits => tab.focus_search = true,
                     Command::Reflog => tab_acts.push(Act::ShowReflog),
+                    Command::Backups => tab_acts.push(Act::Send(Request::Backups)),
+                    Command::GoToCommit(id) => tab_acts.push(Act::GoToId(id)),
                     Command::Dashboard => tab_acts.push(Act::Send(Request::Dashboard)),
                     Command::Hooks => tab.hooks_open = true,
                     Command::ApplyPatch => {
@@ -656,7 +827,18 @@ impl App {
             })
             .unwrap_or_default();
         let tabs: Vec<String> = self.tabs.iter().map(|t| t.title.clone()).collect();
-        let entries = commands::entries(&branches, self.recent.paths(), &tabs);
+        let commits: Vec<(String, String)> = tab
+            .repo
+            .as_ref()
+            .map(|r| {
+                r.commits
+                    .iter()
+                    .take(400)
+                    .map(|c| (c.id.clone(), format!("{}  {}", c.short_id(), c.subject)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let entries = commands::entries(&branches, self.recent.paths(), &tabs, &commits, &self.recent_cmds);
 
         let (up, down, enter, esc) = ctx.input_mut(|i| {
             (
@@ -742,6 +924,16 @@ impl App {
             });
         if let Some(cmd) = chosen {
             self.palette = None;
+            if !matches!(
+                cmd,
+                Command::Checkout(_) | Command::OpenRecent(_) | Command::GoToTab(_) | Command::GoToCommit(_)
+            ) {
+                self.recent_cmds.retain(|c| *c != cmd);
+                self.recent_cmds.push(cmd.clone());
+                if self.recent_cmds.len() > 8 {
+                    self.recent_cmds.remove(0);
+                }
+            }
             self.run_command(ctx, cmd, app_acts);
         }
     }
@@ -964,6 +1156,9 @@ impl App {
                             chosen = Some(OpenEditor);
                         }
                         ui.separator();
+                        if item(ui, "Backups…", "", has_repo) {
+                            chosen = Some(Backups);
+                        }
                         if item(ui, "Repository settings…", "", has_repo) {
                             chosen = Some(RepoSettings);
                         }
@@ -1003,6 +1198,12 @@ impl App {
                     ui.menu_button("Help", |ui| {
                         if item(ui, "Check for updates", "", true) {
                             chosen = Some(CheckUpdates);
+                        }
+                        if item(ui, "Keyboard shortcuts", "?", true) {
+                            chosen = Some(Shortcuts);
+                        }
+                        if item(ui, "What's new", "", true) {
+                            chosen = Some(WhatsNew);
                         }
                         if item(ui, "About Rustle", "", true) {
                             chosen = Some(About);
@@ -1166,6 +1367,32 @@ impl App {
                         theme_changed |= ui.radio_value(&mut s.theme, ThemeMode::Dark, "Dark").changed();
                         theme_changed |= ui.radio_value(&mut s.theme, ThemeMode::Light, "Light").changed();
                         theme_changed |= ui.checkbox(&mut s.follow_system, "Follow Windows").changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Accent");
+                        for (i, (name, col)) in crate::theme::ACCENTS.iter().enumerate() {
+                            let selected = usize::from(s.accent) == i;
+                            let glyph = if selected { "●" } else { "○" };
+                            let r = ui
+                                .add(egui::Button::new(RichText::new(glyph).size(16.0).color(*col)).frame(false))
+                                .on_hover_text(*name);
+                            if r.clicked() {
+                                s.accent = u8::try_from(i).unwrap_or(0);
+                                theme_changed = true;
+                            }
+                        }
+                        theme_changed |= ui.checkbox(&mut s.high_contrast, "High contrast").changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Ticket URL");
+                        let te = ui.add(
+                            egui::TextEdit::singleline(&mut s.ticket_url)
+                                .hint_text("https://tracker.example.com/browse/{id}")
+                                .desired_width(f32::INFINITY),
+                        );
+                        if te.lost_focus() {
+                            s.save();
+                        }
                     });
                     ui.horizontal(|ui| {
                         ui.label("Text size");
@@ -1393,7 +1620,7 @@ impl App {
         }
 
         // ---------------------------------------------------------------- clone
-        let mut start_clone: Option<(String, PathBuf)> = None;
+        let mut start_clone: Option<(String, PathBuf, bool)> = None;
         let mut cancel_clone = false;
         if let Some(c) = &mut self.clone {
             egui::Window::new(bold("Clone repository", 15.0))
@@ -1431,12 +1658,20 @@ impl App {
                                 .color(text_weak()),
                         );
                     }
+                    ui.add_space(4.0);
+                    ui.checkbox(
+                        &mut c.partial,
+                        "Partial clone (file contents on demand, faster for big repositories)",
+                    );
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let ok = !c.url.trim().is_empty() && !c.dest.trim().is_empty();
                         if primary_button(ui, "Clone", ok).clicked() {
-                            start_clone =
-                                Some((c.url.trim().to_string(), Path::new(c.dest.trim()).join(&name)));
+                            start_clone = Some((
+                                c.url.trim().to_string(),
+                                Path::new(c.dest.trim()).join(&name),
+                                c.partial,
+                            ));
                         }
                         if ui.button("Cancel").clicked() {
                             cancel_clone = true;
@@ -1447,11 +1682,11 @@ impl App {
         if cancel_clone {
             self.clone = None;
         }
-        if let Some((url, dest)) = start_clone {
+        if let Some((url, dest, partial)) = start_clone {
             self.clone = None;
             let t = self.target_tab(ctx);
             t.title = repo_name_from_url(&url);
-            t.send(Request::Clone { url, dest });
+            t.send(Request::Clone { url, dest, partial });
         }
         let _ = acts;
     }
@@ -1498,6 +1733,16 @@ impl eframe::App for App {
             app_acts.extend(t.poll(&mut self.settings));
         }
         self.shortcuts(&ctx, &mut app_acts);
+        self.save_session();
+        if !ctx.egui_wants_keyboard_input()
+            && ctx.input(|i| {
+                i.events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::Text(t) if t == "?"))
+            })
+        {
+            self.show_shortcuts = true;
+        }
 
         // Drag a folder onto the window to open it.
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -1571,6 +1816,7 @@ impl eframe::App for App {
         self.windows(&ctx, &mut app_acts);
         self.update_window(&ctx);
         self.palette_ui(&ctx, &mut app_acts);
+        self.info_windows(&ctx);
         self.handle(&ctx, app_acts);
     }
 

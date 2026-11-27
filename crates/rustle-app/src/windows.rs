@@ -14,6 +14,10 @@ use std::time::Duration;
 pub struct CompareView {
     pub a: String,
     pub b: String,
+    pub triple: bool,
+    pub viewed: HashSet<String>,
+    pub diff: Option<(String, DiffView)>,
+    pub sel: HashSet<(usize, usize, usize)>,
     pub only_a: Vec<Commit>,
     pub only_b: Vec<Commit>,
     pub files: Vec<CommitFile>,
@@ -60,7 +64,8 @@ fn commit_list(ui: &mut Ui, title: &str, list: &[Commit]) {
 
 impl Tab {
     pub fn extra_windows(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
-        self.compare_window(ctx);
+        self.compare_window(ctx, acts);
+        self.backups_window(ctx, acts);
         self.dashboard_window(ctx, acts);
         self.hooks_window(ctx, acts);
         self.bisect_window(ctx, acts);
@@ -68,40 +73,180 @@ impl Tab {
         self.toast_ui(ctx);
     }
 
-    fn compare_window(&mut self, ctx: &egui::Context) {
-        let Some(v) = &self.compare_view else { return };
+    fn compare_window(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+        let Some(v) = &mut self.compare_view else { return };
         let mut open = true;
-        egui::Window::new(bold(format!("Compare {} ↔ {}", v.a, v.b), 14.0))
+        let title = if v.triple {
+            format!("Review {} against {}", v.b, v.a)
+        } else {
+            format!("Compare {} ↔ {}", v.a, v.b)
+        };
+        egui::Window::new(bold(title, 14.0))
             .open(&mut open)
-            .default_size([900.0, 560.0])
+            .default_size([1100.0, 660.0])
             .show(ctx, |ui| {
-                ui.columns(2, |c| {
-                    commit_list(&mut c[0], &format!("Only in {}", v.a), &v.only_a);
-                    commit_list(&mut c[1], &format!("Only in {}", v.b), &v.only_b);
+                egui::CollapsingHeader::new(format!("Commits  ({} / {})", v.only_a.len(), v.only_b.len()))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.columns(2, |c| {
+                            commit_list(&mut c[0], &format!("Only in {}", v.a), &v.only_a);
+                            commit_list(&mut c[1], &format!("Only in {}", v.b), &v.only_b);
+                        });
+                    });
+                let total = v.files.len();
+                let seen = v.files.iter().filter(|f| v.viewed.contains(&f.path)).count();
+                ui.horizontal(|ui| {
+                    ui.label(bold(format!("{seen} of {total} files viewed"), 13.0));
+                    ui.add(egui::ProgressBar::new(seen as f32 / total.max(1) as f32).desired_width(160.0));
                 });
                 ui.separator();
-                ui.label(bold(
-                    format!("Changed files from {} to {}  ({})", v.a, v.b, v.files.len()),
-                    13.0,
-                ));
-                egui::ScrollArea::vertical()
-                    .id_salt("cmpfiles")
-                    .auto_shrink(false)
-                    .show(ui, |ui| {
-                        for f in &v.files {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(f.status).monospace().color(status_color(f.status)));
-                                ui.label(&f.path);
-                                if let (Some(a), Some(d)) = (f.added, f.deleted) {
-                                    ui.label(RichText::new(format!("+{a}")).color(green()).size(12.0));
-                                    ui.label(RichText::new(format!("−{d}")).color(red()).size(12.0));
-                                }
-                            });
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(
+                        vec2(340.0, ui.available_height()),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(340.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt("cmpfiles")
+                                .auto_shrink(false)
+                                .show(ui, |ui| {
+                                    for f in &v.files {
+                                        ui.horizontal(|ui| {
+                                            let mut viewed = v.viewed.contains(&f.path);
+                                            if ui
+                                                .checkbox(&mut viewed, "")
+                                                .on_hover_text("Mark as viewed")
+                                                .changed()
+                                            {
+                                                if viewed {
+                                                    v.viewed.insert(f.path.clone());
+                                                } else {
+                                                    v.viewed.remove(&f.path);
+                                                }
+                                            }
+                                            ui.label(
+                                                RichText::new(f.status)
+                                                    .monospace()
+                                                    .color(status_color(f.status)),
+                                            );
+                                            let current = v.diff.as_ref().is_some_and(|(p, _)| *p == f.path);
+                                            let name = f.path.rsplit('/').next().unwrap_or(&f.path);
+                                            if ui
+                                                .selectable_label(current, name)
+                                                .on_hover_text(&f.path)
+                                                .clicked()
+                                            {
+                                                acts.push(Act::Send(Request::ReviewDiff {
+                                                    a: v.a.clone(),
+                                                    b: v.b.clone(),
+                                                    triple: v.triple,
+                                                    path: f.path.clone(),
+                                                }));
+                                            }
+                                            if let (Some(a), Some(d)) = (f.added, f.deleted) {
+                                                ui.label(
+                                                    RichText::new(format!("+{a}")).color(green()).size(11.5),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!("−{d}")).color(red()).size(11.5),
+                                                );
+                                            }
+                                        });
+                                    }
+                                });
+                        },
+                    );
+                    ui.separator();
+                    ui.vertical(|ui| {
+                        if let Some((_, dv)) = &v.diff {
+                            let extras = ViewExtras {
+                                find: None,
+                                current_row: None,
+                                scroll_to: None,
+                                show_ws: false,
+                            };
+                            let mut none = Vec::<DiffAction>::new();
+                            diffview::show(
+                                ui,
+                                "review-diff",
+                                dv,
+                                false,
+                                &mut v.sel,
+                                None,
+                                &extras,
+                                &mut none,
+                            );
+                        } else {
+                            ui.label(RichText::new("Select a file to see its changes.").color(text_weak()));
                         }
                     });
+                });
             });
         if !open {
             self.compare_view = None;
+        }
+    }
+
+    fn backups_window(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+        let Some(list) = &self.backups else { return };
+        let busy = self.busy();
+        let mut open = true;
+        egui::Window::new(bold("Backups", 14.0))
+            .open(&mut open)
+            .default_size([560.0, 380.0])
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "Rustle saves HEAD and your tracked changes here before a hard reset or a discard.",
+                    )
+                    .size(12.0)
+                    .color(text_weak()),
+                );
+                ui.add_space(4.0);
+                if list.is_empty() {
+                    ui.label("No backups yet.");
+                }
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                    for b in list {
+                        ui.horizontal(|ui| {
+                            let kind = if b.refname.ends_with("-work") {
+                                "changes"
+                            } else {
+                                "HEAD"
+                            };
+                            let label = b.refname.rsplit('/').next().unwrap_or("");
+                            let label = label.split_once('-').map_or(label, |(_, l)| l);
+                            ui.label(
+                                RichText::new(fmt::date(b.time, true))
+                                    .size(12.0)
+                                    .color(text_weak()),
+                            );
+                            ui.label(format!("{label}  ({kind})"));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui
+                                    .add_enabled(!busy, egui::Button::new("Delete").small())
+                                    .clicked()
+                                {
+                                    acts.push(Act::Send(Request::DeleteBackup(b.refname.clone())));
+                                }
+                                let restore = if kind == "changes" {
+                                    "Re-apply"
+                                } else {
+                                    "Branch from it"
+                                };
+                                if ui
+                                    .add_enabled(!busy, egui::Button::new(restore).small())
+                                    .clicked()
+                                {
+                                    acts.push(Act::Send(Request::RestoreBackup(b.refname.clone())));
+                                }
+                            });
+                        });
+                    }
+                });
+            });
+        if !open {
+            self.backups = None;
         }
     }
 
@@ -156,6 +301,42 @@ impl Tab {
                             });
                         }
                     });
+                ui.separator();
+                ui.label(bold("Commits per week (last 12 weeks)", 13.0));
+                let max = d
+                    .authors
+                    .iter()
+                    .flat_map(|(_, w)| w.iter().copied())
+                    .max()
+                    .unwrap_or(1)
+                    .max(1);
+                for (who, weeks) in &d.authors {
+                    ui.horizontal(|ui| {
+                        ui.add_sized([150.0, 16.0], egui::Label::new(who.as_str()).truncate());
+                        let (rect, resp) =
+                            ui.allocate_exact_size(vec2(12.0 * 11.0, 18.0), egui::Sense::hover());
+                        for (i, n) in weeks.iter().enumerate() {
+                            let h = 2.0 + 16.0 * (*n as f32 / max as f32);
+                            let x = rect.left() + i as f32 * 11.0;
+                            let bar = egui::Rect::from_min_max(
+                                egui::pos2(x, rect.bottom() - h),
+                                egui::pos2(x + 9.0, rect.bottom()),
+                            );
+                            let c = if *n == 0 {
+                                text_weak().gamma_multiply(0.4)
+                            } else {
+                                accent()
+                            };
+                            ui.painter().rect_filled(bar, 2.0, c);
+                        }
+                        resp.on_hover_text(format!("{} commits in 12 weeks", weeks.iter().sum::<u32>()));
+                        ui.label(
+                            RichText::new(weeks.iter().sum::<u32>().to_string())
+                                .size(12.0)
+                                .color(text_weak()),
+                        );
+                    });
+                }
                 ui.separator();
                 ui.label(bold("Largest files", 13.0));
                 for (path, size) in &d.big_files {

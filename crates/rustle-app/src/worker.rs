@@ -39,10 +39,11 @@ pub enum ImageSrc {
 }
 
 /// Keys shown in the configuration window.
-pub const CONFIG_KEYS: [&str; 9] = [
+pub const CONFIG_KEYS: [&str; 10] = [
     "user.name",
     "user.email",
     "pull.rebase",
+    "rerere.enabled",
     "fetch.prune",
     "push.autoSetupRemote",
     "core.autocrlf",
@@ -68,6 +69,7 @@ pub enum Request {
     Clone {
         url: String,
         dest: PathBuf,
+        partial: bool,
     },
     InitRepo(PathBuf),
     /// Reload everything (log, graph, branches, status).
@@ -273,6 +275,29 @@ pub enum Request {
     BranchCompare {
         a: String,
         b: String,
+        triple: bool,
+    },
+    ReviewDiff {
+        a: String,
+        b: String,
+        triple: bool,
+        path: String,
+    },
+    RebasePreview(String),
+    Backups,
+    RestoreBackup(String),
+    DeleteBackup(String),
+    ForcePushPreview,
+    CheckCommit {
+        message: String,
+        amend: bool,
+        sign: Option<bool>,
+        no_verify: bool,
+    },
+    FetchRemote(String),
+    WebUrl {
+        target: rustle_core::WebTarget,
+        copy: bool,
     },
     StashApply(usize),
     StashPop(usize),
@@ -363,11 +388,31 @@ pub enum Response {
     BranchCompare {
         a: String,
         b: String,
+        triple: bool,
         only_a: Vec<Commit>,
         only_b: Vec<Commit>,
         files: Vec<CommitFile>,
     },
     Dashboard(Box<rustle_core::Dashboard>),
+    ReviewDiff {
+        path: String,
+        text: String,
+    },
+    RebasePreview {
+        onto: String,
+        commits: usize,
+        conflicts: Vec<String>,
+    },
+    Backups(Vec<rustle_core::BackupEntry>),
+    ForcePushPreview(Vec<Commit>),
+    CommitWarnings {
+        findings: Vec<String>,
+        message: String,
+        amend: bool,
+        sign: Option<bool>,
+        no_verify: bool,
+    },
+    CopyText(String),
     Containing {
         id: String,
         branches: Vec<String>,
@@ -626,8 +671,8 @@ impl State {
                 self.open(&path)?;
                 vec![snap(self)?]
             }
-            Request::Clone { url, dest } => {
-                CliBackend::clone_repo(&self.runner()?, &url, &dest, Some(&c))?;
+            Request::Clone { url, dest, partial } => {
+                CliBackend::clone_repo_opts(&self.runner()?, &url, &dest, partial, Some(&c))?;
                 self.open(&dest)?;
                 vec![Response::Info("Repository cloned".into()), snap(self)?]
             }
@@ -672,6 +717,7 @@ impl State {
                 change,
                 include_staged,
             } => {
+                let _ = self.be()?.backup("discard");
                 self.be()?.discard(&change, include_staged)?;
                 self.status()?
             }
@@ -954,6 +1000,9 @@ impl State {
                 vec![msg(r, "Revert complete"), snap(self)?]
             }
             Request::Reset { id, mode } => {
+                if mode == rustle_core::ResetMode::Hard {
+                    let _ = self.be()?.backup("reset");
+                }
                 self.be()?.reset(&id, mode)?;
                 vec![snap(self)?]
             }
@@ -1081,8 +1130,14 @@ impl State {
                 self.be()?.mergetool(&path)?;
                 vec![Response::Info("Merge tool finished".into()), snap(self)?]
             }
-            Request::BranchCompare { a, b } => {
+            Request::BranchCompare { a, b, triple } => {
                 let be = self.be()?;
+                let a = if a.is_empty() {
+                    be.default_base()
+                        .ok_or_else(|| GitError::Parse("no develop, main or master branch found".into()))?
+                } else {
+                    a
+                };
                 let only_a = be.log_query(&LogQuery {
                     revs: vec![format!("{b}..{a}")],
                     ..LogQuery::all(300)
@@ -1091,13 +1146,77 @@ impl State {
                     revs: vec![format!("{a}..{b}")],
                     ..LogQuery::all(300)
                 })?;
-                let files = be.compare_files(&a, &b)?;
+                let files = be.range_files(&a, &b, triple)?;
                 vec![Response::BranchCompare {
                     a,
                     b,
+                    triple,
                     only_a,
                     only_b,
                     files,
+                }]
+            }
+            Request::ReviewDiff { a, b, triple, path } => {
+                let text = self
+                    .be()?
+                    .range_file_diff(&a, &b, triple, &path, self.view.diff)?;
+                vec![Response::ReviewDiff { path, text }]
+            }
+            Request::RebasePreview(onto) => {
+                let (commits, conflicts) = self.be()?.rebase_preview(&onto)?;
+                vec![Response::RebasePreview {
+                    onto,
+                    commits,
+                    conflicts,
+                }]
+            }
+            Request::Backups => vec![Response::Backups(self.be()?.backups()?)],
+            Request::RestoreBackup(r) => {
+                let text = self.be()?.restore_backup(&r)?;
+                vec![
+                    Response::Info(text),
+                    snap(self)?,
+                    Response::Backups(self.be()?.backups()?),
+                ]
+            }
+            Request::DeleteBackup(r) => {
+                self.be()?.delete_backup(&r)?;
+                vec![Response::Backups(self.be()?.backups()?)]
+            }
+            Request::ForcePushPreview => vec![Response::ForcePushPreview(self.be()?.force_push_lost())],
+            Request::CheckCommit {
+                message,
+                amend,
+                sign,
+                no_verify,
+            } => {
+                let findings = self.be()?.check_commit()?;
+                if findings.is_empty() {
+                    return self.handle(Request::Commit {
+                        message,
+                        amend,
+                        sign,
+                        no_verify,
+                    });
+                }
+                vec![Response::CommitWarnings {
+                    findings,
+                    message,
+                    amend,
+                    sign,
+                    no_verify,
+                }]
+            }
+            Request::FetchRemote(n) => {
+                self.be()?.fetch_remote(&n)?;
+                vec![Response::Info(format!("Fetched {n}")), snap(self)?]
+            }
+            Request::WebUrl { target, copy } => {
+                let url = self.be()?.web_url(&target)?;
+                vec![if copy {
+                    Response::CopyText(url)
+                } else {
+                    Response::OpenUrl(url)
                 }]
             }
             Request::StashApply(i) => {

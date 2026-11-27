@@ -9,6 +9,28 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static LIGHT: AtomicBool = AtomicBool::new(false);
+static HIGH_CONTRAST: AtomicBool = AtomicBool::new(false);
+static ACCENT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Accent color presets (the first one is the default blue).
+pub const ACCENTS: [(&str, Color32); 6] = [
+    ("Blue", Color32::from_rgb(0x5b, 0x8d, 0xef)),
+    ("Green", Color32::from_rgb(0x3f, 0xb9, 0x7a)),
+    ("Purple", Color32::from_rgb(0xa9, 0x8b, 0xdc)),
+    ("Orange", Color32::from_rgb(0xe8, 0x92, 0x4a)),
+    ("Pink", Color32::from_rgb(0xe5, 0x6a, 0x9a)),
+    ("Teal", Color32::from_rgb(0x4d, 0xbf, 0xd0)),
+];
+
+/// Sets the accent preset and the high contrast option (call before [`apply`]).
+pub fn set_look(accent: u8, high_contrast: bool) {
+    ACCENT.store(accent, Ordering::Relaxed);
+    HIGH_CONTRAST.store(high_contrast, Ordering::Relaxed);
+}
+
+fn hc() -> bool {
+    HIGH_CONTRAST.load(Ordering::Relaxed)
+}
 static BOLD_OK: AtomicBool = AtomicBool::new(false);
 static ICONS_OK: AtomicBool = AtomicBool::new(false);
 
@@ -68,15 +90,29 @@ pub fn bg_btn_hover() -> Color32 {
     pick(c(0x2b, 0x31, 0x3c), c(0xe1, 0xe5, 0xeb))
 }
 pub fn border() -> Color32 {
+    if hc() {
+        return pick(c(0x8a, 0x93, 0xa6), c(0x55, 0x5d, 0x6e));
+    }
     pick(c(0x28, 0x2d, 0x37), c(0xd9, 0xdd, 0xe4))
 }
 pub fn text() -> Color32 {
+    if hc() {
+        return pick(c(0xff, 0xff, 0xff), c(0x00, 0x00, 0x00));
+    }
     pick(c(0xd3, 0xd7, 0xde), c(0x1d, 0x21, 0x29))
 }
 pub fn text_weak() -> Color32 {
+    if hc() {
+        return pick(c(0xc4, 0xca, 0xd6), c(0x2c, 0x32, 0x3e));
+    }
     pick(c(0x7d, 0x85, 0x96), c(0x6a, 0x72, 0x83))
 }
 pub fn accent() -> Color32 {
+    let i = usize::from(ACCENT.load(Ordering::Relaxed));
+    if i > 0 && i < ACCENTS.len() {
+        let col = ACCENTS[i].1;
+        return if is_light() { col.gamma_multiply(0.8) } else { col };
+    }
     pick(c(0x5b, 0x8d, 0xef), c(0x2a, 0x64, 0xd6))
 }
 pub fn green() -> Color32 {
@@ -193,7 +229,7 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode, scale: f32) {
     v.window_corner_radius = CornerRadius::same(8);
     v.menu_corner_radius = CornerRadius::same(6);
     v.selection.bg_fill = accent().gamma_multiply(0.22);
-    v.selection.stroke = Stroke::new(1.0, accent());
+    v.selection.stroke = Stroke::new(2.0, accent());
     v.hyperlink_color = accent();
     v.override_text_color = Some(text());
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border());

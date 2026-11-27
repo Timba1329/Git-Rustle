@@ -1,8 +1,8 @@
 use crate::error::{GitError, Result};
 use crate::model::{
-    BlameLine, Branch, BranchAge, Commit, CommitFile, ConflictVersions, Dashboard, DiffOpts, FileChange,
-    LogQuery, OpResult, OpState, PatchMode, PullMode, ReflogEntry, ResetMode, Side, StashEntry, Status,
-    Submodule, TodoAction, TodoItem,
+    BackupEntry, BlameLine, Branch, BranchAge, Commit, CommitFile, ConflictVersions, Dashboard, DiffOpts,
+    FileChange, LogQuery, OpResult, OpState, PatchMode, PullMode, ReflogEntry, ResetMode, Side, StashEntry,
+    Status, Submodule, TodoAction, TodoItem,
 };
 use crate::parse::log::{LOG_FORMAT, parse_log};
 use crate::parse::status::parse_status;
@@ -11,6 +11,15 @@ use crate::runner::{CancelToken, GitRunner, RunOpts};
 use std::path::{Path, PathBuf};
 
 const MAX_DIFF_BYTES: usize = 1_000_000;
+
+/// A page of the hosting service for the current repository.
+#[derive(Debug, Clone)]
+pub enum WebTarget {
+    PullRequest(String),
+    Commit(String),
+    Branch(String),
+    File { rev: String, path: String },
+}
 
 pub struct CliBackend {
     pub(crate) runner: GitRunner,
@@ -98,7 +107,24 @@ impl CliBackend {
         dest: &Path,
         cancel: Option<&CancelToken>,
     ) -> Result<()> {
-        let args = ["clone", "-q", "--", url, &dest.to_string_lossy()];
+        Self::clone_repo_opts(runner, url, dest, false, cancel)
+    }
+
+    /// Clone; `partial` fetches file contents on demand (`--filter=blob:none`), which is much
+    /// faster for large repositories.
+    pub fn clone_repo_opts(
+        runner: &GitRunner,
+        url: &str,
+        dest: &Path,
+        partial: bool,
+        cancel: Option<&CancelToken>,
+    ) -> Result<()> {
+        let dest = dest.to_string_lossy();
+        let mut args = vec!["clone", "-q"];
+        if partial {
+            args.push("--filter=blob:none");
+        }
+        args.extend(["--", url, &dest]);
         runner.run_opts(
             &args,
             None,
@@ -184,6 +210,9 @@ impl CliBackend {
         }
         if let Some(a) = &q.author {
             args.push(format!("--author={a}"));
+        }
+        if let Some(p) = &q.pickaxe {
+            args.push(format!("-S{p}"));
         }
         if let Some(d) = &q.since {
             args.push(format!("--since={d}"));
@@ -1081,9 +1110,17 @@ impl CliBackend {
 
     /// URL that opens a pull/merge request for `branch` on GitHub or GitLab.
     pub fn pull_request_url(&self, branch: &str) -> Result<String> {
-        let remote = self
-            .git(&["config", "--get", &format!("branch.{branch}.remote")])
-            .ok()
+        self.web_url(&WebTarget::PullRequest(branch.to_string()))
+    }
+
+    /// Page on GitHub or GitLab for a commit, branch, file or pull request.
+    pub fn web_url(&self, target: &WebTarget) -> Result<String> {
+        let branch_hint = match target {
+            WebTarget::PullRequest(b) | WebTarget::Branch(b) => Some(b.as_str()),
+            _ => None,
+        };
+        let remote = branch_hint
+            .and_then(|b| self.git(&["config", "--get", &format!("branch.{b}.remote")]).ok())
             .map(|o| lossy(&o.stdout).trim().to_string())
             .filter(|r| !r.is_empty())
             .unwrap_or_else(|| "origin".into());
@@ -1103,17 +1140,217 @@ impl CliBackend {
                     .map(|(h, r)| (h.rsplit('@').next().unwrap_or(h).to_string(), r.to_string()))
             })
             .ok_or_else(|| GitError::Parse(format!("cannot read remote url {url}")))?;
-        if host.contains("github") {
-            Ok(format!("https://{host}/{repo}/compare/{branch}?expand=1"))
-        } else if host.contains("gitlab") {
-            Ok(format!(
-                "https://{host}/{repo}/-/merge_requests/new?merge_request[source_branch]={branch}"
-            ))
-        } else {
-            Err(GitError::Parse(format!(
-                "pull requests are supported for GitHub and GitLab, not {host}"
-            )))
+        let gitlab = host.contains("gitlab");
+        if !gitlab && !host.contains("github") {
+            return Err(GitError::Parse(format!(
+                "links are supported for GitHub and GitLab, not {host}"
+            )));
         }
+        let dash = if gitlab { "/-" } else { "" };
+        let base = format!("https://{host}/{repo}");
+        Ok(match target {
+            WebTarget::PullRequest(b) if gitlab => {
+                format!("{base}/-/merge_requests/new?merge_request[source_branch]={b}")
+            }
+            WebTarget::PullRequest(b) => format!("{base}/compare/{b}?expand=1"),
+            WebTarget::Commit(id) => format!("{base}{dash}/commit/{id}"),
+            WebTarget::Branch(b) => format!("{base}{dash}/tree/{b}"),
+            WebTarget::File { rev, path } => format!("{base}{dash}/blob/{rev}/{path}"),
+        })
+    }
+
+    /// Files changed between two refs; with `triple` as `a...b` (changes on b since the merge base).
+    pub fn range_files(&self, a: &str, b: &str, triple: bool) -> Result<Vec<CommitFile>> {
+        let range = if triple {
+            format!("{a}...{b}")
+        } else {
+            format!("{a}..{b}")
+        };
+        let out = self.git(&["diff", "-z", "--name-status", "-M", &range])?;
+        let mut files = Self::name_status(&out.stdout);
+        if let Ok(ns) = self.git(&["diff", "-z", "--numstat", "-M", &range]) {
+            Self::apply_numstat(&mut files, &ns.stdout);
+        }
+        Ok(files)
+    }
+
+    pub fn range_file_diff(
+        &self,
+        a: &str,
+        b: &str,
+        triple: bool,
+        path: &str,
+        opts: DiffOpts,
+    ) -> Result<String> {
+        let range = if triple {
+            format!("{a}...{b}")
+        } else {
+            format!("{a}..{b}")
+        };
+        let mut args = vec!["diff".to_string(), "-M".to_string()];
+        args.extend(Self::diff_args(opts));
+        args.push(range);
+        let out = self.git(&with_paths(args, &[path.to_string()]))?;
+        Ok(text(&out.stdout))
+    }
+
+    /// Replays HEAD onto `onto` in a throw-away worktree and reports the conflicting files.
+    pub fn rebase_preview(&self, onto: &str) -> Result<(usize, Vec<String>)> {
+        let count = self
+            .git(&["rev-list", "--count", &format!("{onto}..HEAD")])
+            .ok()
+            .and_then(|o| lossy(&o.stdout).trim().parse().ok())
+            .unwrap_or(0);
+        let gd = lossy(&self.git(&["rev-parse", "--absolute-git-dir"])?.stdout)
+            .trim()
+            .to_string();
+        let tmp = PathBuf::from(gd).join(format!("rustle-preview-{}", std::process::id()));
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        self.git(&["worktree", "add", "--detach", &tmp_s, "HEAD"])?;
+        let r = self.runner.run(&["rebase", onto], Some(&tmp));
+        let conflicts: Vec<String> = if r.is_err() {
+            self.runner
+                .run(&["diff", "--name-only", "--diff-filter=U"], Some(&tmp))
+                .map(|o| lossy(&o.stdout).lines().map(str::to_string).collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let _ = self.runner.run(&["rebase", "--abort"], Some(&tmp));
+        let _ = self.git(&["worktree", "remove", "--force", &tmp_s]);
+        if let Err(e) = r
+            && conflicts.is_empty()
+        {
+            return Err(e);
+        }
+        Ok((count, conflicts))
+    }
+
+    /// Saves HEAD and the tracked working-tree changes under `refs/rustle-backup/`.
+    pub fn backup(&self, label: &str) -> Result<()> {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if let Ok(o) = self.git(&["stash", "create"]) {
+            let w = lossy(&o.stdout).trim().to_string();
+            if !w.is_empty() {
+                self.git(&["update-ref", &format!("refs/rustle-backup/{ts}-{label}-work"), &w])?;
+            }
+        }
+        if let Ok(o) = self.git(&["rev-parse", "HEAD"]) {
+            let h = lossy(&o.stdout).trim().to_string();
+            if !h.is_empty() {
+                self.git(&["update-ref", &format!("refs/rustle-backup/{ts}-{label}-head"), &h])?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn backups(&self) -> Result<Vec<BackupEntry>> {
+        let out = self.git(&[
+            "for-each-ref",
+            "--sort=-refname",
+            "--format=%(refname)%1f%(objectname)%1f%(committerdate:unix)",
+            "refs/rustle-backup",
+        ])?;
+        Ok(lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split('\x1f').collect();
+                (f.len() == 3).then(|| BackupEntry {
+                    refname: f[0].to_string(),
+                    id: f[1].to_string(),
+                    time: f[2].parse().unwrap_or(0),
+                })
+            })
+            .collect())
+    }
+
+    /// Re-applies saved changes, or creates a branch at the saved HEAD.
+    pub fn restore_backup(&self, refname: &str) -> Result<String> {
+        if refname.ends_with("-work") {
+            self.git(&["stash", "apply", refname])?;
+            Ok("Saved changes re-applied".into())
+        } else {
+            let name = format!(
+                "rustle-restore-{}",
+                refname
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("backup")
+                    .trim_end_matches("-head")
+            );
+            self.git(&["branch", &name, refname])?;
+            Ok(format!("Created branch {name}"))
+        }
+    }
+
+    pub fn delete_backup(&self, refname: &str) -> Result<()> {
+        self.git(&["update-ref", "-d", refname])?;
+        Ok(())
+    }
+
+    /// Commits on the upstream that a force push would throw away.
+    pub fn force_push_lost(&self) -> Vec<Commit> {
+        self.log_query(&LogQuery {
+            revs: vec!["HEAD..@{u}".into()],
+            ..LogQuery::all(100)
+        })
+        .unwrap_or_default()
+    }
+
+    /// Warnings about the staged changes: secrets and very large files.
+    pub fn check_commit(&self) -> Result<Vec<String>> {
+        let mut out: Vec<String> = Vec::new();
+        let names = self.git(&["diff", "--cached", "--name-only", "-z"])?;
+        for t in names.stdout.split(|&b| b == 0).filter(|t| !t.is_empty()) {
+            let p = decode_path(t);
+            if let Some(why) = crate::secrets::suspicious_file(&p) {
+                out.push(format!("{p}: {why}"));
+            }
+            if let Ok(m) = std::fs::metadata(self.repo.join(&p))
+                && m.len() > 50 * 1024 * 1024
+            {
+                out.push(format!("{p}: {} MB, consider Git LFS", m.len() / (1024 * 1024)));
+            }
+        }
+        let diff = self.git(&["diff", "--cached", "-U0", "--no-color", "--diff-filter=AM"])?;
+        let mut cur = String::new();
+        for l in lossy(&diff.stdout).lines() {
+            if let Some(p) = l.strip_prefix("+++ b/") {
+                cur = p.to_string();
+            } else if let Some(added) = l.strip_prefix('+')
+                && !l.starts_with("+++")
+                && let Some(why) = crate::secrets::scan_line(added)
+            {
+                let item = format!("{cur}: {why}");
+                if !out.contains(&item) {
+                    out.push(item);
+                }
+            }
+        }
+        out.truncate(20);
+        Ok(out)
+    }
+
+    /// The first of develop, main, master (local or origin) that exists.
+    pub fn default_base(&self) -> Option<String> {
+        [
+            "develop",
+            "main",
+            "master",
+            "origin/develop",
+            "origin/main",
+            "origin/master",
+        ]
+        .iter()
+        .find(|n| self.git(&["rev-parse", "--verify", "-q", n]).is_ok())
+        .map(|n| (*n).to_string())
+    }
+
+    pub fn fetch_remote(&self, remote: &str) -> Result<()> {
+        self.git(&["fetch", remote])?;
+        Ok(())
     }
 
     /// Commits the staged changes as a fixup of `id` and folds it into that commit.
@@ -1281,6 +1518,25 @@ impl CliBackend {
         let tracked_files = files.len();
         files.sort_by_key(|f| std::cmp::Reverse(f.1));
         files.truncate(15);
+        let mut by_author: std::collections::HashMap<String, Vec<u32>> = Default::default();
+        if let Ok(o) = self.git(&[
+            "log",
+            "--since=12.weeks.ago",
+            "--no-merges",
+            "--format=%an%x1f%at",
+        ]) {
+            for l in lossy(&o.stdout).lines() {
+                if let Some((who, at)) = l.split_once('\x1f')
+                    && let Ok(at) = at.trim().parse::<i64>()
+                {
+                    let week = ((now - at) / (7 * 86_400)).clamp(0, 11) as usize;
+                    by_author.entry(who.to_string()).or_insert_with(|| vec![0; 12])[11 - week] += 1;
+                }
+            }
+        }
+        let mut authors: Vec<(String, Vec<u32>)> = by_author.into_iter().collect();
+        authors.sort_by_key(|(_, w)| std::cmp::Reverse(w.iter().sum::<u32>()));
+        authors.truncate(8);
         let commits = self
             .git(&["rev-list", "--count", "HEAD"])
             .ok()
@@ -1292,6 +1548,7 @@ impl CliBackend {
             tracked_files,
             stale,
             big_files: files,
+            authors,
         })
     }
 

@@ -65,16 +65,22 @@ fn change_tree_ui(
     }
 }
 
-/// A ticket key such as `I2C-180` found in a branch name, as a commit message prefix.
+/// A ticket key such as `I2C-180` found in some text (a branch name or a commit subject).
+pub fn ticket_key(text: &str) -> Option<String> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .find_map(|tok| {
+            let (a, b) = tok.split_once('-')?;
+            let digits: String = b.chars().take_while(char::is_ascii_digit).collect();
+            let ok = a.len() >= 2
+                && a.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && a.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+            (ok && !digits.is_empty()).then(|| format!("{a}-{digits}"))
+        })
+}
+
+/// The same key as a commit message prefix.
 fn ticket_prefix(branch: &str) -> Option<String> {
-    branch.split(['/', '_', ' ']).find_map(|tok| {
-        let (a, b) = tok.split_once('-')?;
-        let digits: String = b.chars().take_while(char::is_ascii_digit).collect();
-        let ok = a.len() >= 2
-            && a.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-            && a.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
-        (ok && !digits.is_empty()).then(|| format!("{a}-{digits}: "))
-    })
+    ticket_key(branch).map(|k| format!("{k}: "))
 }
 
 fn display_order<'a>(list: &[&'a FileChange]) -> Vec<&'a FileChange> {
@@ -127,6 +133,11 @@ fn file_row(
     let cy = rect.center().y;
     let letter = status_letter(f, is_staged);
     status_icon(&p, pos2(rect.left() + 12.0, cy), letter);
+    p.circle_filled(
+        pos2(rect.left() + 29.0, cy),
+        3.0,
+        crate::panels::ext_color(&f.path),
+    );
 
     let right_pad = if is_lfs { 62.0 } else { 30.0 } + if stat.is_some() { 80.0 } else { 0.0 };
     if let Some((a, d)) = stat {
@@ -156,7 +167,7 @@ fn file_row(
         pos2(rect.right() - right_pad, rect.bottom()),
     ));
     let g = tp.layout_no_wrap(name.to_string(), FontId::proportional(13.5), text());
-    let x = rect.left() + 28.0;
+    let x = rect.left() + 38.0;
     let w = g.size().x;
     tp.galley(pos2(x, cy - g.size().y / 2.0), g, text());
     if !dir.is_empty() {

@@ -120,6 +120,10 @@ pub enum Act {
     },
     SelectCommitFile(String),
     TogglePin(String),
+    SetBranchColor {
+        name: String,
+        idx: Option<usize>,
+    },
     GoToId(String),
     GoToHead,
     BisectPick {
@@ -271,6 +275,9 @@ pub struct Tab {
     pub commit_files: Vec<CommitFile>,
     pub selected_cfile: Option<String>,
     pub pins: Vec<String>,
+    pub branch_colors: std::collections::HashMap<String, usize>,
+    pub pickaxe: String,
+    pub backups: Option<Vec<rustle_core::BackupEntry>>,
     pub bisect_pick: Option<(String, bool)>,
     pub view_range: (usize, usize),
     pub compare_view: Option<crate::windows::CompareView>,
@@ -417,6 +424,9 @@ impl Tab {
             commit_files: Vec::new(),
             selected_cfile: None,
             pins: Vec::new(),
+            branch_colors: std::collections::HashMap::new(),
+            pickaxe: String::new(),
+            backups: None,
             bisect_pick: None,
             view_range: (0, 0),
             compare_view: None,
@@ -538,6 +548,7 @@ impl Tab {
             revs: self.graph_refs.clone(),
             since: opt(&self.since),
             until: opt(&self.until),
+            pickaxe: opt(&self.pickaxe),
             ..Default::default()
         }
     }
@@ -960,14 +971,98 @@ impl Tab {
                     };
                 }
                 Response::OpenUrl(url) => self.ctx.open_url(egui::OpenUrl::new_tab(url)),
+                Response::ReviewDiff { path, text } => {
+                    let dark = settings.theme == ThemeMode::Dark;
+                    if let Some(v) = &mut self.compare_view {
+                        v.sel.clear();
+                        v.diff = Some((path.clone(), DiffView::build(path, &text, dark)));
+                    }
+                }
+                Response::RebasePreview {
+                    onto,
+                    commits,
+                    conflicts,
+                } => {
+                    let text = if conflicts.is_empty() {
+                        format!("Rebasing {commits} commit(s) onto {onto} works without conflicts.")
+                    } else {
+                        format!(
+                            "Rebasing {commits} commit(s) onto {onto} conflicts in {} file(s):\n\n{}",
+                            conflicts.len(),
+                            conflicts.join("\n")
+                        )
+                    };
+                    self.dialog = Dialog::Confirm {
+                        title: "Rebase preview".into(),
+                        text,
+                        button: "Rebase".into(),
+                        req: Some(Request::Rebase(onto)),
+                    };
+                }
+                Response::Backups(list) => self.backups = Some(list),
+                Response::ForcePushPreview(lost) => {
+                    let mut text = String::from(
+                        "Overwrite the remote branch with your local branch? The push is refused if someone else \
+                         pushed in the meantime (--force-with-lease).",
+                    );
+                    if !lost.is_empty() {
+                        text.push_str(&format!(
+                            "\n\nThese {} commit(s) on the remote will be lost:\n",
+                            lost.len()
+                        ));
+                        for c in lost.iter().take(12) {
+                            text.push_str(&format!("\n{}  {}", c.short_id(), c.subject));
+                        }
+                        if lost.len() > 12 {
+                            text.push_str(&format!("\n… and {} more", lost.len() - 12));
+                        }
+                    }
+                    self.dialog = Dialog::Confirm {
+                        title: "Force push".into(),
+                        text,
+                        button: "Force push".into(),
+                        req: Some(Request::Push { force: true }),
+                    };
+                }
+                Response::CommitWarnings {
+                    findings,
+                    message,
+                    amend,
+                    sign,
+                    no_verify,
+                } => {
+                    self.dialog = Dialog::Confirm {
+                        title: "Check before committing".into(),
+                        text: format!(
+                            "The staged changes contain:\n\n{}\n\nCommit anyway? (A Commit & Push then needs a separate push.)",
+                            findings.join("\n")
+                        ),
+                        button: "Commit anyway".into(),
+                        req: Some(Request::Commit {
+                            message,
+                            amend,
+                            sign,
+                            no_verify,
+                        }),
+                    };
+                }
+                Response::CopyText(t) => {
+                    self.ctx.copy_text(t);
+                    self.toast = Some(("Copied to the clipboard".into(), Instant::now()));
+                }
                 Response::BranchCompare {
                     a,
                     b,
+                    triple,
                     only_a,
                     only_b,
                     files,
                 } => {
                     self.compare_view = Some(crate::windows::CompareView {
+                        triple,
+                        viewed: HashSet::new(),
+                        diff: None,
+                        sel: HashSet::new(),
                         a,
                         b,
                         only_a,
@@ -1469,6 +1564,19 @@ impl Tab {
                     Ok(d) => self.dialog = d,
                     Err(e) => self.info = Some(e),
                 },
+                Act::SetBranchColor { name, idx } => {
+                    match idx {
+                        Some(i) => {
+                            self.branch_colors.insert(name, i);
+                        }
+                        None => {
+                            self.branch_colors.remove(&name);
+                        }
+                    }
+                    if let Some(r) = &self.repo {
+                        crate::branches::save_colors(&r.path, &self.branch_colors);
+                    }
+                }
                 Act::TogglePin(n) => {
                     if let Some(i) = self.pins.iter().position(|x| *x == n) {
                         self.pins.remove(i);
@@ -1497,7 +1605,7 @@ impl Tab {
                         self.last_message = msg.clone();
                         self.push_after = true;
                         let (amend, sign, no_verify) = (self.amend, self.sign, self.no_verify);
-                        self.send(Request::Commit {
+                        self.send(Request::CheckCommit {
                             message: msg,
                             amend,
                             sign: Some(sign),
@@ -1510,7 +1618,7 @@ impl Tab {
                     if !msg.is_empty() {
                         self.last_message = msg.clone();
                         let (amend, sign, no_verify) = (self.amend, self.sign, self.no_verify);
-                        self.send(Request::Commit {
+                        self.send(Request::CheckCommit {
                             message: msg,
                             amend,
                             sign: Some(sign),
@@ -1579,6 +1687,7 @@ impl Tab {
                     self.author.clear();
                     self.since.clear();
                     self.until.clear();
+                    self.pickaxe.clear();
                     self.graph_refs.clear();
                     self.path_filter = None;
                     self.branch_only = false;

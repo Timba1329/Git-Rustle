@@ -10,17 +10,18 @@ pub mod model;
 pub mod parse;
 pub mod pathenc;
 pub mod runner;
+pub mod secrets;
 
-pub use backend::CliBackend;
+pub use backend::{CliBackend, WebTarget};
 pub use diffparse::{
     FileDiff, Hunk, LineKind, SbsCell, SbsRow, build_patch, intra_change, parse_diff, side_by_side,
 };
 pub use error::GitError;
 pub use graph::{Graph, GraphRow, Seg, build_graph};
 pub use model::{
-    BlameLine, Branch, BranchAge, Commit, CommitFile, ConfigValue, ConflictVersions, Dashboard, DiffOpts,
-    FileChange, GrepHit, LfsInfo, LogQuery, OpResult, OpState, PatchMode, PullMode, RefKind, RefLabel,
-    ReflogEntry, Remote, ResetMode, Side, SignatureInfo, StashEntry, Status, Submodule, TodoAction, TodoItem,
-    Worktree,
+    BackupEntry, BlameLine, Branch, BranchAge, Commit, CommitFile, ConfigValue, ConflictVersions, Dashboard,
+    DiffOpts, FileChange, GrepHit, LfsInfo, LogQuery, OpResult, OpState, PatchMode, PullMode, RefKind,
+    RefLabel, ReflogEntry, Remote, ResetMode, Side, SignatureInfo, StashEntry, Status, Submodule, TodoAction,
+    TodoItem, Worktree,
 };
 pub use runner::{CancelToken, GitRunner, RunOpts};

@@ -1,9 +1,11 @@
 use crate::panels::ctx_item;
+use crate::panels::lane_color;
 use crate::tab::{Act, Dialog, InputKind};
 use crate::theme::{self, accent, bg_btn, bg_btn_hover, green, nav_row, nav_row_badges, text_weak};
 use crate::worker::Request;
-use eframe::egui::{self, Align2, FontId, Rect, RichText, Sense, Ui, pos2, vec2};
+use eframe::egui::{self, Align2, Color32, FontId, Rect, RichText, Sense, Ui, pos2, vec2};
 use rustle_core::Branch;
+use rustle_core::WebTarget;
 use std::collections::BTreeMap;
 
 pub fn pins_file(repo: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -24,6 +26,32 @@ pub fn save_pins(repo: &std::path::Path, pins: &[String]) {
     }
 }
 
+fn colors_file(repo: &std::path::Path) -> Option<std::path::PathBuf> {
+    let g = repo.join(".git");
+    g.is_dir().then(|| g.join("rustle-colors"))
+}
+
+pub fn load_colors(repo: &std::path::Path) -> std::collections::HashMap<String, usize> {
+    colors_file(repo)
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .map(|s| {
+            s.lines()
+                .filter_map(|l| {
+                    let (name, idx) = l.rsplit_once('\t')?;
+                    Some((name.to_string(), idx.parse().ok()?))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn save_colors(repo: &std::path::Path, colors: &std::collections::HashMap<String, usize>) {
+    if let Some(f) = colors_file(repo) {
+        let text: String = colors.iter().map(|(n, i)| format!("{n}\t{i}\n")).collect();
+        let _ = std::fs::write(f, text);
+    }
+}
+
 pub fn branch_rank(name: &str, pins: &[String]) -> (u8, usize) {
     if let Some(i) = pins.iter().position(|p| p == name) {
         (0, i)
@@ -39,12 +67,21 @@ pub struct TreeOpen {
     pub base: bool,
     pub epoch: u32,
     pub all: Option<bool>,
+    /// The tree lists remote branches (the first level is the remote's name).
+    pub remote: bool,
 }
 
 impl TreeOpen {
     pub fn open(self, depth: usize) -> bool {
         self.all.unwrap_or(self.base || depth == 0)
     }
+}
+
+/// What a right click on a folder asked for.
+pub enum DirReq {
+    NewBranch(String),
+    FetchRemote(String),
+    PruneRemote(String),
 }
 
 #[derive(Default)]
@@ -76,7 +113,7 @@ pub fn btree_ui(
     open: TreeOpen,
     depth: usize,
     row: &mut dyn FnMut(&mut Ui, &Branch, &str),
-    mut dir_req: Option<&mut Option<String>>,
+    mut dir_req: Option<&mut Option<DirReq>>,
 ) {
     for (name, child) in &node.dirs {
         let id = format!("{prefix}{name}/");
@@ -88,8 +125,17 @@ pub fn btree_ui(
             });
         if let Some(req) = dir_req.as_deref_mut() {
             r.header_response.context_menu(|ui| {
-                if ctx_item(ui, "New branch in this folder…", true) {
-                    *req = Some(id.get(2..).unwrap_or("").to_string());
+                if open.remote {
+                    if depth == 0 {
+                        if ctx_item(ui, "Fetch this remote", true) {
+                            *req = Some(DirReq::FetchRemote(name.clone()));
+                        }
+                        if ctx_item(ui, "Prune stale branches", true) {
+                            *req = Some(DirReq::PruneRemote(name.clone()));
+                        }
+                    }
+                } else if ctx_item(ui, "New branch in this folder…", true) {
+                    *req = Some(DirReq::NewBranch(id.get(2..).unwrap_or("").to_string()));
                 }
             });
         }
@@ -132,6 +178,7 @@ fn pin_overlay(ui: &mut Ui, row: &egui::Response, pinned: bool, name: &str, acts
     r.on_hover_text(if pinned { "Unpin" } else { "Pin to top" });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn local_branch_row(
     ui: &mut Ui,
     b: &Branch,
@@ -139,13 +186,14 @@ pub fn local_branch_row(
     busy: bool,
     current: &Option<String>,
     pinned: bool,
+    dot: Option<Color32>,
     acts: &mut Vec<Act>,
 ) {
     let resp = nav_row_badges(
         ui,
         label,
         b.is_head,
-        b.is_head.then_some(green()),
+        dot.or(b.is_head.then_some(green())),
         &crate::panels::branch_badges(b),
     );
     if resp.double_clicked() && !b.is_head && !busy {
@@ -178,6 +226,51 @@ pub fn local_branch_row(
         ) {
             acts.push(Act::Send(Request::FastForward(b.name.clone())));
         }
+        if ctx_item(ui, "Open on GitHub / GitLab", true) {
+            acts.push(Act::Send(Request::WebUrl {
+                target: WebTarget::Branch(b.name.clone()),
+                copy: false,
+            }));
+        }
+        if ctx_item(ui, "Copy link", true) {
+            acts.push(Act::Send(Request::WebUrl {
+                target: WebTarget::Branch(b.name.clone()),
+                copy: true,
+            }));
+        }
+        ui.menu_button("Color", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.set_max_width(180.0);
+                for i in 0..12 {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("●").size(16.0).color(lane_color(i)))
+                                .frame(false),
+                        )
+                        .clicked()
+                    {
+                        acts.push(Act::SetBranchColor {
+                            name: b.name.clone(),
+                            idx: Some(i),
+                        });
+                        ui.close();
+                    }
+                }
+            });
+            if ctx_item(ui, "Default", true) {
+                acts.push(Act::SetBranchColor {
+                    name: b.name.clone(),
+                    idx: None,
+                });
+            }
+        });
+        if ctx_item(ui, "Review changes against the base branch", true) {
+            acts.push(Act::Send(Request::BranchCompare {
+                a: String::new(),
+                b: b.name.clone(),
+                triple: true,
+            }));
+        }
         if ctx_item(ui, "Show only this branch in graph", true) {
             acts.push(Act::GraphOnly(Some(b.name.clone())));
         }
@@ -204,6 +297,7 @@ pub fn local_branch_row(
                 acts.push(Act::Send(Request::BranchCompare {
                     a: b.name.clone(),
                     b: cur.clone(),
+                    triple: false,
                 }));
             }
             if ctx_item(ui, &format!("Preview merge into {cur}"), !b.is_head) {
@@ -211,6 +305,9 @@ pub fn local_branch_row(
             }
             if ctx_item(ui, &format!("Merge into {cur}"), !b.is_head) {
                 acts.push(Act::Send(Request::Merge(b.name.clone())));
+            }
+            if ctx_item(ui, &format!("Preview rebase {cur} onto this"), !b.is_head) {
+                acts.push(Act::Send(Request::RebasePreview(b.name.clone())));
             }
             if ctx_item(ui, &format!("Rebase {cur} onto this"), !b.is_head) {
                 acts.push(Act::Send(Request::Rebase(b.name.clone())));
@@ -269,6 +366,7 @@ pub fn remote_branch_row(
                 acts.push(Act::Send(Request::BranchCompare {
                     a: b.name.clone(),
                     b: cur.clone(),
+                    triple: false,
                 }));
             }
             if ctx_item(ui, &format!("Preview merge into {cur}"), true) {
@@ -276,6 +374,9 @@ pub fn remote_branch_row(
             }
             if ctx_item(ui, &format!("Merge into {cur}"), true) {
                 acts.push(Act::Send(Request::Merge(b.name.clone())));
+            }
+            if ctx_item(ui, &format!("Preview rebase {cur} onto this"), true) {
+                acts.push(Act::Send(Request::RebasePreview(b.name.clone())));
             }
             if ctx_item(ui, &format!("Rebase {cur} onto this"), true) {
                 acts.push(Act::Send(Request::Rebase(b.name.clone())));
