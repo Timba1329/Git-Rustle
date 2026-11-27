@@ -10,6 +10,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static LIGHT: AtomicBool = AtomicBool::new(false);
 static BOLD_OK: AtomicBool = AtomicBool::new(false);
+static ICONS_OK: AtomicBool = AtomicBool::new(false);
+
+pub const IC_PIN: char = '\u{E718}';
+pub const IC_PIN_ON: char = '\u{E841}';
+pub const IC_PUSH: char = '\u{E898}';
+pub const IC_PULL: char = '\u{E896}';
+pub const IC_FETCH: char = '\u{E895}';
+pub const IC_REFRESH: char = '\u{E72C}';
+
+pub fn icons_ok() -> bool {
+    ICONS_OK.load(Ordering::Relaxed)
+}
+
+/// A glyph from the icon font, or the text fallback when the font is unavailable.
+pub fn icon(code: char, fallback: &str) -> String {
+    if ICONS_OK.load(Ordering::Relaxed) {
+        code.to_string()
+    } else {
+        fallback.to_string()
+    }
+}
 
 pub fn is_light() -> bool {
     LIGHT.load(Ordering::Relaxed)
@@ -115,6 +136,20 @@ pub fn install_fonts(ctx: &egui::Context) {
         ],
         FontFamily::Monospace,
     );
+    for f in [r"C:\Windows\Fonts\SegoeIcons.ttf", r"C:\Windows\Fonts\segmdl2.ttf"] {
+        if let Ok(bytes) = std::fs::read(f) {
+            fonts
+                .font_data
+                .insert("icons".to_string(), Arc::new(FontData::from_owned(bytes)));
+            fonts
+                .families
+                .entry(FontFamily::Proportional)
+                .or_default()
+                .push("icons".to_string());
+            ICONS_OK.store(true, Ordering::Relaxed);
+            break;
+        }
+    }
     // Semibold looks more refined than full bold for headings.
     if load(
         &mut fonts,
@@ -262,7 +297,7 @@ pub fn icon_button(ui: &mut Ui, glyph: &str, tip: &str, enabled: bool) -> Respon
         FontId::proportional(15.0),
         color,
     );
-    resp.on_hover_text(tip)
+    resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Small heading in capitals above a list.
@@ -319,5 +354,5 @@ pub fn nav_row_badges(
     let galley = tp.layout_no_wrap(label.to_string(), FontId::proportional(13.5), color);
     let pos = pos2(rect.left() + 24.0, rect.center().y - galley.size().y / 2.0);
     tp.galley(pos, galley, color);
-    resp
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

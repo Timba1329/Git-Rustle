@@ -1,9 +1,11 @@
 //! Drawing of the main panels of a tab: header, sidebar, commit graph and commit details.
 
 use crate::diffview::{self, DiffAction, DiffView, ViewExtras};
+use crate::branches::{btree_ui, build_btree, local_branch_row, remote_branch_row};
 use crate::fmt;
 use crate::imagediff;
 use crate::settings::Settings;
+use crate::theme;
 use crate::tab::{Act, AppAct, Dialog, InputKind, RebaseRow, Tab};
 use crate::theme::{
     accent, amber, bg_bar, bg_btn, bg_main, bg_side, bold, border, ghost, green, icon_button, nav_row,
@@ -91,7 +93,7 @@ fn first_parent_chain_to<'a>(commits: &'a [Commit], from: &str, to: &str) -> Opt
 }
 
 /// Small status badges for a local branch: commits to push/pull, or why there is no tracking.
-fn branch_badges(b: &Branch) -> Vec<(String, Color32)> {
+pub fn branch_badges(b: &Branch) -> Vec<(String, Color32)> {
     if b.is_remote {
         return Vec::new();
     }
@@ -112,7 +114,7 @@ fn branch_badges(b: &Branch) -> Vec<(String, Color32)> {
 }
 
 /// Explains the badges of [`branch_badges`] in words.
-fn branch_tip(b: &Branch) -> String {
+pub fn branch_tip(b: &Branch) -> String {
     if b.is_remote {
         return String::new();
     }
@@ -133,6 +135,32 @@ fn branch_tip(b: &Branch) -> String {
             plural(d)
         ),
     }
+}
+
+fn tool_btn(
+    ui: &mut Ui,
+    glyph: char,
+    fallback: &str,
+    count: u32,
+    tip: &str,
+    enabled: bool,
+    color: Option<Color32>,
+) -> egui::Response {
+    let mut label = if theme::icons_ok() {
+        glyph.to_string()
+    } else {
+        fallback.to_string()
+    };
+    if count > 0 {
+        label = format!("{label} {count}");
+    }
+    let mut t = RichText::new(label).size(if theme::icons_ok() { 14.0 } else { 12.5 });
+    if let Some(c) = color {
+        t = t.color(c);
+    }
+    ui.add_enabled(enabled, egui::Button::new(t).min_size(vec2(30.0, 24.0)))
+        .on_hover_text(tip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn small(label: &str) -> egui::Button<'_> {
@@ -280,8 +308,11 @@ impl Tab {
                             ui.separator();
                             egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
                                 for (title, remote) in [("Local branches", false), ("Remote branches", true)] {
-                                    let list: Vec<&Branch> =
+                                    let mut list: Vec<&Branch> =
                                         r.branches.iter().filter(|b| b.is_remote == remote).collect();
+                                    if !remote {
+                                        list.sort_by_key(|b| crate::branches::branch_rank(&b.name, &pins));
+                                    }
                                     if list.is_empty() {
                                         continue;
                                     }
@@ -397,43 +428,49 @@ impl Tab {
                                 acts.push(Act::App(AppAct::About));
                             }
                         });
-                        let push = if st.ahead > 0 {
-                            format!("Push  {}", st.ahead)
-                        } else {
-                            "Push".into()
-                        };
-                        if ui.add_enabled(!busy, small(&push)).clicked() {
+                        if tool_btn(
+                            ui,
+                            theme::IC_PUSH,
+                            "Push",
+                            st.ahead,
+                            "Push the current branch",
+                            !busy,
+                            None,
+                        )
+                        .clicked()
+                        {
                             acts.push(Act::Send(Request::Push { force: false }));
                         }
-                        let pull = if st.behind > 0 {
-                            format!("Pull  {}", st.behind)
-                        } else {
-                            "Pull".into()
-                        };
-                        if ui.add_enabled(!busy, small(&pull)).clicked() {
+                        if tool_btn(
+                            ui,
+                            theme::IC_PULL,
+                            "Pull",
+                            st.behind,
+                            "Pull from the upstream branch",
+                            !busy,
+                            None,
+                        )
+                        .clicked()
+                        {
                             acts.push(Act::Send(Request::Pull));
                         }
                         let ago = self.last_fetch.elapsed().as_secs() / 60;
                         let mut tip = if ago == 0 {
-                            "Last fetch: less than a minute ago.".to_string()
+                            "Fetch. Last fetch: less than a minute ago.".to_string()
                         } else {
-                            format!("Last fetch: {ago} min ago.")
+                            format!("Fetch. Last fetch: {ago} min ago.")
                         };
-                        let fetch_label = match &self.auto_fetch_error {
-                            Some(e) => {
-                                tip = format!("The last automatic fetch failed:\n{e}");
-                                RichText::new("Fetch  !").size(12.5).color(amber())
-                            }
-                            None => RichText::new("Fetch").size(12.5),
-                        };
-                        if ui
-                            .add_enabled(!busy, egui::Button::new(fetch_label))
-                            .on_hover_text(tip)
-                            .clicked()
-                        {
+                        let mut warn = None;
+                        if let Some(e) = &self.auto_fetch_error {
+                            tip = format!("The last automatic fetch failed:\n{e}");
+                            warn = Some(amber());
+                        }
+                        if tool_btn(ui, theme::IC_FETCH, "Fetch", 0, &tip, !busy, warn).clicked() {
                             acts.push(Act::Send(Request::Fetch));
                         }
-                        if ui.add_enabled(!busy, small("Refresh")).clicked() {
+                        if tool_btn(ui, theme::IC_REFRESH, "Refresh", 0, "Reload the repository", !busy, None)
+                            .clicked()
+                        {
                             acts.push(Act::Send(Request::Refresh));
                         }
                     });
@@ -554,6 +591,14 @@ impl Tab {
             return;
         }
         let busy = self.busy();
+        if let Some(path) = self.repo.as_ref().map(|r| r.path.clone()) {
+            let key = path.to_string_lossy().to_string();
+            if self.pins_for != key {
+                self.pins = crate::branches::load_pins(&path);
+                self.pins_for = key;
+            }
+        }
+        let pins = self.pins.clone();
         let frame = Frame::new().fill(bg_side()).inner_margin(Margin::symmetric(8, 8));
         egui::Panel::left("sidebar")
             .frame(frame)
@@ -588,75 +633,35 @@ impl Tab {
                             }
                         });
                     });
-                    for b in r.branches.iter().filter(|b| !b.is_remote) {
-                        let resp = nav_row_badges(
-                            ui,
-                            &b.name,
-                            b.is_head,
-                            b.is_head.then_some(green()),
-                            &branch_badges(b),
-                        );
-                        if resp.double_clicked() && !b.is_head && !busy {
-                            acts.push(Act::Send(Request::Checkout(b.clone())));
+                    let locals: Vec<&Branch> = r.branches.iter().filter(|b| !b.is_remote).collect();
+                    let pinned_list: Vec<&Branch> = pins
+                        .iter()
+                        .filter_map(|n| locals.iter().copied().find(|b| &b.name == n))
+                        .collect();
+                    let mains: Vec<&Branch> = locals
+                        .iter()
+                        .copied()
+                        .filter(|b| matches!(b.name.as_str(), "main" | "master") && !pins.contains(&b.name))
+                        .collect();
+                    if !pinned_list.is_empty() {
+                        ui.label(heading("PINNED".into()));
+                        for b in &pinned_list {
+                            local_branch_row(ui, b, &b.name, busy, &current, true, acts);
                         }
-                        let mut tip = branch_tip(b);
-                        if !b.is_head {
-                            tip.push_str("\nDouble-click to check out.");
-                        }
-                        resp.clone().on_hover_text(tip);
-                        resp.context_menu(|ui| {
-                            if ctx_item(ui, "Check out", !b.is_head) {
-                                acts.push(Act::Send(Request::Checkout(b.clone())));
-                            }
-                            let has_up = b.upstream.is_some() && !b.gone;
-                            let push_label = if has_up { "Push" } else { "Publish branch" };
-                            if ctx_item(ui, push_label, !busy && (b.ahead > 0 || !has_up)) {
-                                acts.push(Act::Send(Request::PushBranch(b.name.clone())));
-                            }
-                            if ctx_item(
-                                ui,
-                                "Fast-forward to upstream",
-                                !busy && !b.is_head && has_up && b.behind > 0 && b.ahead == 0,
-                            ) {
-                                acts.push(Act::Send(Request::FastForward(b.name.clone())));
-                            }
-                            ui.separator();
-                            if let Some(cur) = &current {
-                                if ctx_item(ui, &format!("Merge into {cur}"), !b.is_head) {
-                                    acts.push(Act::Send(Request::Merge(b.name.clone())));
-                                }
-                                if ctx_item(ui, &format!("Rebase {cur} onto this"), !b.is_head) {
-                                    acts.push(Act::Send(Request::Rebase(b.name.clone())));
-                                }
-                            }
-                            if ctx_item(ui, "Rename…", true) {
-                                acts.push(Act::Dialog(Dialog::Input {
-                                    title: "Rename branch".into(),
-                                    label: "New name".into(),
-                                    value: b.name.clone(),
-                                    kind: InputKind::RenameBranch { old: b.name.clone() },
-                                    check: None,
-                                }));
-                            }
-                            if ctx_item(ui, "Delete…", !b.is_head) {
-                                acts.push(Act::Dialog(Dialog::Confirm {
-                                    title: "Delete branch".into(),
-                                    text: format!(
-                                        "Delete the local branch {}? Unmerged commits can be lost.",
-                                        b.name
-                                    ),
-                                    button: "Delete".into(),
-                                    req: Some(Request::DeleteBranch {
-                                        name: b.name.clone(),
-                                        force: true,
-                                    }),
-                                }));
-                            }
-                            if ctx_item(ui, "Copy name", true) {
-                                ui.ctx().copy_text(b.name.clone());
-                            }
-                        });
+                        ui.add_space(4.0);
                     }
+                    for b in &mains {
+                        local_branch_row(ui, b, &b.name, busy, &current, false, acts);
+                    }
+                    let rest: Vec<&Branch> = locals
+                        .iter()
+                        .copied()
+                        .filter(|b| !pins.contains(&b.name) && !mains.iter().any(|m| m.name == b.name))
+                        .collect();
+                    let tree = build_btree(&rest);
+                    btree_ui(ui, &tree, "l:", true, 0, &mut |ui, b, label| {
+                        local_branch_row(ui, b, label, busy, &current, false, acts);
+                    });
 
                     let remotes: Vec<&Branch> = r.branches.iter().filter(|b| b.is_remote).collect();
                     if !remotes.is_empty() {
@@ -664,47 +669,10 @@ impl Tab {
                         egui::CollapsingHeader::new(heading(format!("REMOTES  {}", remotes.len())))
                             .default_open(true)
                             .show(ui, |ui| {
-                                for b in remotes {
-                                    let resp = nav_row(ui, &b.name, false, None);
-                                    if resp.double_clicked() && !busy {
-                                        acts.push(Act::Send(Request::Checkout(b.clone())));
-                                    }
-                                    resp.clone()
-                                        .on_hover_text("Double-click to check out as a local branch");
-                                    resp.context_menu(|ui| {
-                                        if ctx_item(ui, "Check out as local branch", true) {
-                                            acts.push(Act::Send(Request::Checkout(b.clone())));
-                                        }
-                                        if let Some(cur) = &current {
-                                            if ctx_item(ui, &format!("Merge into {cur}"), true) {
-                                                acts.push(Act::Send(Request::Merge(b.name.clone())));
-                                            }
-                                            if ctx_item(ui, &format!("Rebase {cur} onto this"), true) {
-                                                acts.push(Act::Send(Request::Rebase(b.name.clone())));
-                                            }
-                                            if ctx_item(ui, &format!("Set as upstream of {cur}"), true) {
-                                                acts.push(Act::Send(Request::SetUpstream {
-                                                    branch: cur.clone(),
-                                                    upstream: b.name.clone(),
-                                                }));
-                                            }
-                                        }
-                                        if ctx_item(ui, "Delete on remote…", true) {
-                                            acts.push(Act::Dialog(Dialog::Confirm {
-                                                title: "Delete remote branch".into(),
-                                                text: format!(
-                                                    "Delete {} from the remote? This affects everyone.",
-                                                    b.name
-                                                ),
-                                                button: "Delete".into(),
-                                                req: Some(Request::DeleteRemoteBranch(b.name.clone())),
-                                            }));
-                                        }
-                                        if ctx_item(ui, "Copy name", true) {
-                                            ui.ctx().copy_text(b.name.clone());
-                                        }
-                                    });
-                                }
+                                let tree = build_btree(&remotes);
+                                btree_ui(ui, &tree, "r:", false, 0, &mut |ui, b, label| {
+                                    remote_branch_row(ui, b, label, busy, &current, acts);
+                                });
                             });
                     }
                     if !r.tags.is_empty() {
@@ -1231,32 +1199,19 @@ impl Tab {
                             .auto_shrink(false)
                             .show(ui, |ui| {
                                 ui.spacing_mut().item_spacing.y = 0.0;
-                                for f in &self.commit_files {
-                                    let sel = self.selected_cfile.as_deref() == Some(f.path.as_str());
-                                    let resp = commit_file_row(ui, f, sel);
-                                    if resp.clicked() {
-                                        acts.push(Act::SelectCommitFile(f.path.clone()));
-                                    }
-                                    let rev = self.selected_id.clone();
-                                    resp.context_menu(|ui| {
-                                        if ctx_item(ui, "View file at this commit", f.status != 'D') {
-                                            acts.push(Act::OpenFile {
-                                                rev: rev.clone(),
-                                                path: f.path.clone(),
-                                                line: None,
-                                            });
-                                        }
-                                        if ctx_item(ui, "File history", true) {
-                                            acts.push(Act::History(f.path.clone()));
-                                        }
-                                        if ctx_item(ui, "Blame", f.status != 'D') {
-                                            acts.push(Act::Blame(f.path.clone()));
-                                        }
-                                        if ctx_item(ui, "Copy path", true) {
-                                            ui.ctx().copy_text(f.path.clone());
-                                        }
-                                    });
+                                let total_a: u32 = self.commit_files.iter().filter_map(|f| f.added).sum();
+                                let total_d: u32 = self.commit_files.iter().filter_map(|f| f.deleted).sum();
+                                let all_sel = self.selected_cfile.as_deref() == Some("");
+                                let r = all_rows(ui, self.commit_files.len(), total_a, total_d, all_sel);
+                                if r.clicked() {
+                                    acts.push(Act::SelectCommitFile(String::new()));
                                 }
+                                let paths: Vec<String> = self.commit_files.iter().map(|f| f.path.clone()).collect();
+                                let tree = crate::tab::FileTree::build(&paths);
+                                let by_path: std::collections::HashMap<&str, &CommitFile> =
+                                    self.commit_files.iter().map(|f| (f.path.as_str(), f)).collect();
+                                let rev = self.selected_id.clone();
+                                commit_tree_ui(ui, &tree, "", &by_path, self.selected_cfile.as_deref(), &rev, acts);
                             });
                     });
                     ui.separator();
@@ -1321,7 +1276,99 @@ impl Tab {
     }
 }
 
-fn commit_file_row(ui: &mut Ui, f: &CommitFile, selected: bool) -> egui::Response {
+fn all_rows(ui: &mut Ui, n: usize, a: u32, d: u32, selected: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+    let p = ui.painter_at(rect);
+    if selected {
+        p.rect_filled(rect, 3.0, accent().gamma_multiply(0.16));
+    } else if resp.hovered() {
+        p.rect_filled(rect, 3.0, bg_btn());
+    }
+    let cy = rect.center().y;
+    p.text(
+        pos2(rect.left() + 6.0, cy),
+        Align2::LEFT_CENTER,
+        format!("All files ({n})"),
+        FontId::proportional(13.0),
+        text(),
+    );
+    paint_counts(&p, rect, Some(a), Some(d));
+    resp.on_hover_text("Show the diff of all files in this commit")
+}
+
+fn paint_counts(p: &egui::Painter, rect: egui::Rect, a: Option<u32>, d: Option<u32>) {
+    let cy = rect.center().y;
+    let mut x = rect.right() - 6.0;
+    let f = FontId::monospace(11.5);
+    if a.is_none() && d.is_none() {
+        p.text(pos2(x, cy), Align2::RIGHT_CENTER, "bin", f, text_weak());
+        return;
+    }
+    let ds = format!("\u{2212}{}", d.unwrap_or(0));
+    let r = p.text(pos2(x, cy), Align2::RIGHT_CENTER, ds, f.clone(), Color32::from_rgb(0xe5, 0x53, 0x4b));
+    x = r.left() - 6.0;
+    p.text(
+        pos2(x, cy),
+        Align2::RIGHT_CENTER,
+        format!("+{}", a.unwrap_or(0)),
+        f,
+        Color32::from_rgb(0x3f, 0xb9, 0x50),
+    );
+}
+
+fn commit_tree_ui(
+    ui: &mut Ui,
+    node: &crate::tab::FileTree,
+    prefix: &str,
+    by_path: &std::collections::HashMap<&str, &CommitFile>,
+    selected: Option<&str>,
+    rev: &Option<String>,
+    acts: &mut Vec<Act>,
+) {
+    for (name, child) in &node.dirs {
+        let path = format!("{prefix}{name}");
+        let (mut label, mut cur, mut c) = (name.clone(), path.clone(), child);
+        while c.files.is_empty() && c.dirs.len() == 1 {
+            let (n, ch) = c.dirs.iter().next().unwrap();
+            label = format!("{label}/{n}");
+            cur = format!("{cur}/{n}");
+            c = ch;
+        }
+        egui::CollapsingHeader::new(RichText::new(label).size(13.0))
+            .id_salt(("cdir", &cur))
+            .default_open(true)
+            .show(ui, |ui| {
+                commit_tree_ui(ui, c, &format!("{cur}/"), by_path, selected, rev, acts);
+            });
+    }
+    for (name, full) in &node.files {
+        let Some(f) = by_path.get(full.as_str()) else { continue };
+        let resp = commit_file_row(ui, f, selected == Some(f.path.as_str()), Some(name.as_str()));
+        if resp.clicked() {
+            acts.push(Act::SelectCommitFile(f.path.clone()));
+        }
+        resp.context_menu(|ui| {
+            if ctx_item(ui, "View file at this commit", f.status != 'D') {
+                acts.push(Act::OpenFile {
+                    rev: rev.clone(),
+                    path: f.path.clone(),
+                    line: None,
+                });
+            }
+            if ctx_item(ui, "File history", true) {
+                acts.push(Act::History(f.path.clone()));
+            }
+            if ctx_item(ui, "Blame", f.status != 'D') {
+                acts.push(Act::Blame(f.path.clone()));
+            }
+            if ctx_item(ui, "Copy path", true) {
+                ui.ctx().copy_text(f.path.clone());
+            }
+        });
+    }
+}
+
+fn commit_file_row(ui: &mut Ui, f: &CommitFile, selected: bool, name_only: Option<&str>) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
     let p = ui.painter_at(rect);
     if selected {
@@ -1337,11 +1384,13 @@ fn commit_file_row(ui: &mut Ui, f: &CommitFile, selected: bool) -> egui::Respons
         FontId::monospace(12.0),
         status_color(f.status),
     );
-    let (dir, name) = match f.path.rsplit_once('/') {
-        Some((d, n)) => (format!("{d}/"), n),
-        None => (String::new(), f.path.as_str()),
+    let (dir, name) = match (name_only, f.path.rsplit_once('/')) {
+        (Some(n), _) => (String::new(), n),
+        (None, Some((d, n))) => (format!("{d}/"), n),
+        (None, None) => (String::new(), f.path.as_str()),
     };
-    let tp = p.with_clip_rect(rect);
+    paint_counts(&p, rect, f.added, f.deleted);
+    let tp = p.with_clip_rect(rect.with_max_x(rect.right() - 70.0));
     let g = tp.layout_no_wrap(name.to_string(), FontId::proportional(13.0), text());
     let x = rect.left() + 24.0;
     let w = g.size().x;
@@ -1387,7 +1436,7 @@ fn wip_row(ui: &mut Ui, r: &RepoData, graph_w: f32, grow: &GraphRow, acts: &mut 
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
     let p = ui.painter_at(rect);
     if resp.hovered() {
-        p.rect_filled(rect, 0.0, bg_side());
+        p.rect_filled(rect, 0.0, bg_btn());
     }
     // Lines as usual, but a hollow node: this is not a commit (yet).
     let mut node_less = grow.clone();
@@ -1466,7 +1515,7 @@ fn commit_row(
         );
         p.rect_filled(Rect::from_min_size(rect.min, vec2(2.0, ROW_H)), 0.0, accent());
     } else if resp.hovered() {
-        p.rect_filled(rect, 0.0, bg_side());
+        p.rect_filled(rect, 0.0, bg_btn());
     }
     draw_graph(&p, rect, grow, c.parents.len() > 1, bg_main());
 

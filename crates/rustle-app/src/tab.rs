@@ -119,6 +119,8 @@ pub enum Act {
         to: String,
     },
     SelectCommitFile(String),
+    TogglePin(String),
+    CommitPush,
     SelectFile(FileChange, bool),
     OpenCommit,
     Commit,
@@ -153,6 +155,10 @@ pub struct ConflictEditor {
     pub choices: Vec<Option<Choice>>,
     /// Text of the custom edit of each block.
     pub custom: Vec<String>,
+    /// Block that is currently focused.
+    pub focus: usize,
+    /// Block to scroll to on the next frame.
+    pub jump: Option<usize>,
 }
 
 pub enum ViewerState {
@@ -241,6 +247,10 @@ pub struct Tab {
     pub signature: Option<(String, char, String)>,
     pub commit_files: Vec<CommitFile>,
     pub selected_cfile: Option<String>,
+    pub pins: Vec<String>,
+    pub msg_prefilled: bool,
+    pub push_after: bool,
+    pub pins_for: String,
     pub commit_diff: Option<DiffView>,
     pub commit_image: Option<ImageDiffView>,
     pub commit_sel: LineSel,
@@ -359,6 +369,10 @@ impl Tab {
             signature: None,
             commit_files: Vec::new(),
             selected_cfile: None,
+            pins: Vec::new(),
+            msg_prefilled: false,
+            push_after: false,
+            pins_for: String::new(),
             commit_diff: None,
             commit_image: None,
             commit_sel: LineSel::new(),
@@ -754,9 +768,13 @@ impl Tab {
                         let keep = self
                             .selected_cfile
                             .as_ref()
-                            .is_some_and(|p| files.iter().any(|f| &f.path == p));
+                            .is_some_and(|p| p.is_empty() || files.iter().any(|f| &f.path == p));
                         if !keep {
-                            self.selected_cfile = files.first().map(|f| f.path.clone());
+                            self.selected_cfile = if files.len() > 1 {
+                                Some(String::new())
+                            } else {
+                                files.first().map(|f| f.path.clone())
+                            };
                         }
                         self.commit_files = files;
                         if self.selected_cfile.is_some() {
@@ -789,6 +807,8 @@ impl Tab {
                                     segs,
                                     choices: vec![None; n],
                                     custom: vec![String::new(); n],
+                                    focus: 0,
+                                    jump: Some(0),
                                 });
                             }
                             self.conflict = None;
@@ -844,6 +864,14 @@ impl Tab {
                 }
                 Response::HookOutput(t) => self.hook_output = Some(t),
                 Response::Committed => {
+                    if self.push_after {
+                        self.push_after = false;
+                        let branch = self.repo.as_ref().and_then(|r| r.status.branch.clone());
+                        match branch {
+                            Some(b) => self.send(Request::PushBranch(b)),
+                            None => self.send(Request::Push { force: false }),
+                        }
+                    }
                     settings.remember_message(&self.last_message);
                     settings.save();
                     self.message.clear();
@@ -859,6 +887,7 @@ impl Tab {
                     self.error = None;
                 }
                 Response::Error(e) => {
+                    self.push_after = false;
                     self.error = Some(e);
                     self.info = None;
                 }
@@ -1188,6 +1217,16 @@ impl Tab {
                     Ok(d) => self.dialog = d,
                     Err(e) => self.info = Some(e),
                 },
+                Act::TogglePin(n) => {
+                    if let Some(i) = self.pins.iter().position(|x| *x == n) {
+                        self.pins.remove(i);
+                    } else {
+                        self.pins.push(n);
+                    }
+                    if let Some(r) = &self.repo {
+                        crate::branches::save_pins(&r.path, &self.pins);
+                    }
+                }
                 Act::SelectCommitFile(p) => {
                     self.selected_cfile = Some(p);
                     self.request_commit_file_diff();
@@ -1199,6 +1238,20 @@ impl Tab {
                         self.sign = r.sign_default;
                     }
                     self.reselect();
+                }
+                Act::CommitPush => {
+                    let msg = self.message.trim().to_string();
+                    if !msg.is_empty() {
+                        self.last_message = msg.clone();
+                        self.push_after = true;
+                        let (amend, sign, no_verify) = (self.amend, self.sign, self.no_verify);
+                        self.send(Request::Commit {
+                            message: msg,
+                            amend,
+                            sign: Some(sign),
+                            no_verify,
+                        });
+                    }
                 }
                 Act::Commit => {
                     let msg = self.message.trim().to_string();

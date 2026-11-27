@@ -24,6 +24,8 @@ pub enum Choice {
     Theirs,
     /// Ours followed by theirs.
     Both,
+    /// Theirs followed by ours.
+    BothReversed,
     Base,
     Custom(String),
 }
@@ -125,7 +127,17 @@ pub fn resolve(segs: &[Segment], choices: &[Option<Choice>]) -> String {
                     Some(Choice::Theirs) => out.push_str(&b.theirs),
                     Some(Choice::Both) => {
                         out.push_str(&b.ours);
+                        if !b.ours.is_empty() && !b.ours.ends_with('\n') {
+                            out.push('\n');
+                        }
                         out.push_str(&b.theirs);
+                    }
+                    Some(Choice::BothReversed) => {
+                        out.push_str(&b.theirs);
+                        if !b.theirs.is_empty() && !b.theirs.ends_with('\n') {
+                            out.push('\n');
+                        }
+                        out.push_str(&b.ours);
                     }
                     Some(Choice::Base) => out.push_str(b.base.as_deref().unwrap_or("")),
                     Some(Choice::Custom(t)) => out.push_str(t),

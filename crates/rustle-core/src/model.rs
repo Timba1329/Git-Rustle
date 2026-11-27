@@ -78,6 +78,8 @@ pub struct Status {
     pub files: Vec<FileChange>,
     /// A merge/rebase/cherry-pick/revert that is in progress.
     pub op: OpState,
+    /// (path, staged) -> (added, deleted) line counts.
+    pub stats: std::collections::HashMap<(String, bool), (u32, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +151,8 @@ pub struct CommitFile {
     pub status: char,
     pub path: String,
     pub orig_path: Option<String>,
+    pub added: Option<u32>,
+    pub deleted: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

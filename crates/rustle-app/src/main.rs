@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod branches;
 mod askpass;
 mod commands;
 mod commit_window;

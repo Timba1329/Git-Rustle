@@ -223,6 +223,7 @@ pub enum Request {
         mode: ResetMode,
     },
     OpContinue,
+    OpContinueMsg(String),
     OpAbort,
     RebaseSkip,
     Resolve {
@@ -886,6 +887,10 @@ impl State {
             }
             Request::OpContinue => {
                 let r = self.be()?.op_continue()?;
+                vec![msg(r, "Operation complete"), snap(self)?]
+            }
+            Request::OpContinueMsg(m) => {
+                let r = self.be()?.op_continue_msg(&m)?;
                 vec![msg(r, "Operation complete"), snap(self)?]
             }
             Request::OpAbort => {
