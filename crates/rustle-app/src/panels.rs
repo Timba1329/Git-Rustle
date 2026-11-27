@@ -311,7 +311,7 @@ impl Tab {
                                     let mut list: Vec<&Branch> =
                                         r.branches.iter().filter(|b| b.is_remote == remote).collect();
                                     if !remote {
-                                        list.sort_by_key(|b| crate::branches::branch_rank(&b.name, &pins));
+                                        list.sort_by_key(|b| crate::branches::branch_rank(&b.name, &self.pins));
                                     }
                                     if list.is_empty() {
                                         continue;

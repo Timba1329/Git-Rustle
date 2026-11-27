@@ -85,7 +85,7 @@ fn file_row(
         let r = p.text(
             pos2(rect.right() - 34.0, cy),
             Align2::RIGHT_CENTER,
-            format!("\−{d}"),
+            format!("−{d}"),
             f.clone(),
             Color32::from_rgb(0xe5, 0x53, 0x4b),
         );
