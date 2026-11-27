@@ -136,7 +136,10 @@ pub fn install_fonts(ctx: &egui::Context) {
         ],
         FontFamily::Monospace,
     );
-    for f in [r"C:\Windows\Fonts\SegoeIcons.ttf", r"C:\Windows\Fonts\segmdl2.ttf"] {
+    for f in [
+        r"C:\Windows\Fonts\SegoeIcons.ttf",
+        r"C:\Windows\Fonts\segmdl2.ttf",
+    ] {
         if let Ok(bytes) = std::fs::read(f) {
             fonts
                 .font_data
@@ -297,7 +300,8 @@ pub fn icon_button(ui: &mut Ui, glyph: &str, tip: &str, enabled: bool) -> Respon
         FontId::proportional(15.0),
         color,
     );
-    resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+    resp.on_hover_text(tip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Small heading in capitals above a list.

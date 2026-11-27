@@ -1,12 +1,12 @@
 //! Drawing of the main panels of a tab: header, sidebar, commit graph and commit details.
 
-use crate::diffview::{self, DiffAction, DiffView, ViewExtras};
 use crate::branches::{btree_ui, build_btree, local_branch_row, remote_branch_row};
+use crate::diffview::{self, DiffAction, DiffView, ViewExtras};
 use crate::fmt;
 use crate::imagediff;
 use crate::settings::Settings;
-use crate::theme;
 use crate::tab::{Act, AppAct, Dialog, InputKind, RebaseRow, Tab};
+use crate::theme;
 use crate::theme::{
     accent, amber, bg_bar, bg_btn, bg_main, bg_side, bold, border, ghost, green, icon_button, nav_row,
     nav_row_badges, primary_button, purple, red, section_label, text, text_weak,
@@ -1206,12 +1206,21 @@ impl Tab {
                                 if r.clicked() {
                                     acts.push(Act::SelectCommitFile(String::new()));
                                 }
-                                let paths: Vec<String> = self.commit_files.iter().map(|f| f.path.clone()).collect();
+                                let paths: Vec<String> =
+                                    self.commit_files.iter().map(|f| f.path.clone()).collect();
                                 let tree = crate::tab::FileTree::build(&paths);
                                 let by_path: std::collections::HashMap<&str, &CommitFile> =
                                     self.commit_files.iter().map(|f| (f.path.as_str(), f)).collect();
                                 let rev = self.selected_id.clone();
-                                commit_tree_ui(ui, &tree, "", &by_path, self.selected_cfile.as_deref(), &rev, acts);
+                                commit_tree_ui(
+                                    ui,
+                                    &tree,
+                                    "",
+                                    &by_path,
+                                    self.selected_cfile.as_deref(),
+                                    &rev,
+                                    acts,
+                                );
                             });
                     });
                     ui.separator();
@@ -1305,7 +1314,13 @@ fn paint_counts(p: &egui::Painter, rect: egui::Rect, a: Option<u32>, d: Option<u
         return;
     }
     let ds = format!("\u{2212}{}", d.unwrap_or(0));
-    let r = p.text(pos2(x, cy), Align2::RIGHT_CENTER, ds, f.clone(), Color32::from_rgb(0xe5, 0x53, 0x4b));
+    let r = p.text(
+        pos2(x, cy),
+        Align2::RIGHT_CENTER,
+        ds,
+        f.clone(),
+        Color32::from_rgb(0xe5, 0x53, 0x4b),
+    );
     x = r.left() - 6.0;
     p.text(
         pos2(x, cy),
@@ -1342,7 +1357,9 @@ fn commit_tree_ui(
             });
     }
     for (name, full) in &node.files {
-        let Some(f) = by_path.get(full.as_str()) else { continue };
+        let Some(f) = by_path.get(full.as_str()) else {
+            continue;
+        };
         let resp = commit_file_row(ui, f, selected == Some(f.path.as_str()), Some(name.as_str()));
         if resp.clicked() {
             acts.push(Act::SelectCommitFile(f.path.clone()));

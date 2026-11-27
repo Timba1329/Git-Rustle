@@ -208,7 +208,10 @@ impl CliBackend {
         ])?;
         let mut st = parse_status(&out.stdout)?;
         st.op = self.op_state();
-        for (staged, args) in [(false, vec!["diff", "-z", "--numstat"]), (true, vec!["diff", "--cached", "-z", "--numstat"])] {
+        for (staged, args) in [
+            (false, vec!["diff", "-z", "--numstat"]),
+            (true, vec!["diff", "--cached", "-z", "--numstat"]),
+        ] {
             if let Ok(o) = self.git(&args) {
                 for (p, a, d) in Self::parse_numstat(&o.stdout) {
                     if let (Some(a), Some(d)) = (a, d) {
@@ -415,12 +418,20 @@ impl CliBackend {
     }
 
     fn parse_numstat(out: &[u8]) -> Vec<(String, Option<u32>, Option<u32>)> {
-        let toks: Vec<String> = out.split(|&b| b == 0).filter(|t| !t.is_empty()).map(decode_path).collect();
+        let toks: Vec<String> = out
+            .split(|&b| b == 0)
+            .filter(|t| !t.is_empty())
+            .map(decode_path)
+            .collect();
         let mut res = Vec::new();
         let mut i = 0;
         while i < toks.len() {
             let mut it = toks[i].splitn(3, '\t');
-            let (a, d, p) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
+            let (a, d, p) = (
+                it.next().unwrap_or(""),
+                it.next().unwrap_or(""),
+                it.next().unwrap_or(""),
+            );
             let (a, d) = (a.parse::<u32>().ok(), d.parse::<u32>().ok());
             let path = if p.is_empty() {
                 let np = toks.get(i + 2).cloned().unwrap_or_default();
@@ -457,7 +468,11 @@ impl CliBackend {
         ]);
         args.extend(Self::diff_args(opts));
         args.push(id.to_string());
-        let paths: Vec<String> = if path.is_empty() { vec![] } else { vec![path.to_string()] };
+        let paths: Vec<String> = if path.is_empty() {
+            vec![]
+        } else {
+            vec![path.to_string()]
+        };
         let out = self.git(&with_paths(args, &paths))?;
         Ok(text(&out.stdout))
     }
@@ -477,7 +492,11 @@ impl CliBackend {
         args.extend(Self::diff_args(opts));
         args.push(a.to_string());
         args.push(b.to_string());
-        let paths: Vec<String> = if path.is_empty() { vec![] } else { vec![path.to_string()] };
+        let paths: Vec<String> = if path.is_empty() {
+            vec![]
+        } else {
+            vec![path.to_string()]
+        };
         let out = self.git(&with_paths(args, &paths))?;
         Ok(text(&out.stdout))
     }

@@ -80,7 +80,10 @@ fn pin_overlay(ui: &mut Ui, row: &egui::Response, pinned: bool, name: &str, acts
     if !ui.rect_contains_pointer(row.rect) {
         return;
     }
-    let rect = Rect::from_center_size(pos2(row.rect.right() - 13.0, row.rect.center().y), vec2(20.0, 20.0));
+    let rect = Rect::from_center_size(
+        pos2(row.rect.right() - 13.0, row.rect.center().y),
+        vec2(20.0, 20.0),
+    );
     let r = ui.interact(rect, row.id.with("pin"), Sense::click());
     ui.painter()
         .rect_filled(rect, 4.0, if r.hovered() { bg_btn_hover() } else { bg_btn() });
@@ -94,7 +97,11 @@ fn pin_overlay(ui: &mut Ui, row: &egui::Response, pinned: bool, name: &str, acts
         Align2::CENTER_CENTER,
         glyph,
         FontId::proportional(13.0),
-        if pinned || r.hovered() { accent() } else { text_weak() },
+        if pinned || r.hovered() {
+            accent()
+        } else {
+            text_weak()
+        },
     );
     if r.clicked() {
         acts.push(Act::TogglePin(name.to_string()));
@@ -169,7 +176,10 @@ pub fn local_branch_row(
         if ctx_item(ui, "Delete…", !b.is_head) {
             acts.push(Act::Dialog(Dialog::Confirm {
                 title: "Delete branch".into(),
-                text: format!("Delete the local branch {}? Unmerged commits can be lost.", b.name),
+                text: format!(
+                    "Delete the local branch {}? Unmerged commits can be lost.",
+                    b.name
+                ),
                 button: "Delete".into(),
                 req: Some(Request::DeleteBranch {
                     name: b.name.clone(),

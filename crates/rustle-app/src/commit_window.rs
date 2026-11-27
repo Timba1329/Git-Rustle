@@ -6,15 +6,16 @@ use crate::diffview::{self, DiffAction, StageCtx, ViewExtras};
 use crate::imagediff;
 use crate::panels::{find_bar, status_color};
 use crate::settings::Settings;
-use crate::theme;
 use crate::tab::{Act, AppAct, ConflictEditor, Dialog, Tab};
+use crate::theme;
 use crate::theme::{
     accent, amber, bg_btn, bg_btn_hover, bg_input, bold, border, green, primary_button, purple, red, text,
     text_weak,
 };
 use crate::worker::Request;
 use eframe::egui::{
-    self, Align, Align2, Color32, FontId, Frame, Layout, Margin, Rect, RichText, Sense, Stroke, Ui, pos2, vec2,
+    self, Align, Align2, Color32, FontId, Frame, Layout, Margin, Rect, RichText, Sense, Stroke, Ui, pos2,
+    vec2,
 };
 use rustle_core::conflict::{Choice, Segment};
 use rustle_core::{FileChange, OpState, Side};
@@ -180,8 +181,19 @@ fn context_text(ui: &mut Ui, t: &str) {
     }
 }
 
-fn conflict_column(ui: &mut Ui, title: &str, body: &str, color: egui::Color32, selected: bool, clickable: bool) -> bool {
-    let (fill, width, edge) = if selected { (0.24, 2.0, 0.95) } else { (0.10, 1.0, 0.35) };
+fn conflict_column(
+    ui: &mut Ui,
+    title: &str,
+    body: &str,
+    color: egui::Color32,
+    selected: bool,
+    clickable: bool,
+) -> bool {
+    let (fill, width, edge) = if selected {
+        (0.24, 2.0, 0.95)
+    } else {
+        (0.10, 1.0, 0.35)
+    };
     let r = Frame::new()
         .fill(color.gamma_multiply(fill))
         .stroke(Stroke::new(width, color.gamma_multiply(edge)))
@@ -205,12 +217,8 @@ fn conflict_column(ui: &mut Ui, title: &str, body: &str, color: egui::Color32, s
         .on_hover_text("Click to use this side")
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     if resp.hovered() {
-        ui.painter().rect_stroke(
-            resp.rect,
-            4.0,
-            Stroke::new(1.5, color),
-            egui::StrokeKind::Outside,
-        );
+        ui.painter()
+            .rect_stroke(resp.rect, 4.0, Stroke::new(1.5, color), egui::StrokeKind::Outside);
     }
     resp.clicked()
 }
@@ -272,8 +280,13 @@ fn conflict_editor_ui(ui: &mut Ui, e: &mut ConflictEditor, busy: bool, acts: &mu
                     ui.add_space(6.0);
                     let focused = e.focus == k;
                     let head = ui.horizontal(|ui| {
-                        let state = if e.choices[k].is_some() { "resolved" } else { "unresolved" };
-                        let mut title = RichText::new(format!("Conflict {} of {total}  ·  {state}", k + 1)).size(13.0);
+                        let state = if e.choices[k].is_some() {
+                            "resolved"
+                        } else {
+                            "unresolved"
+                        };
+                        let mut title =
+                            RichText::new(format!("Conflict {} of {total}  ·  {state}", k + 1)).size(13.0);
                         title = if e.choices[k].is_some() {
                             title.color(green())
                         } else if focused {
@@ -286,7 +299,8 @@ fn conflict_editor_ui(ui: &mut Ui, e: &mut ConflictEditor, busy: bool, acts: &mu
                             let choice = &mut e.choices[k];
                             let is = |c: &Option<Choice>, t: &Choice| c.as_ref() == Some(t);
                             let before = choice.clone();
-                            if choice.is_some() && ui.add(small("✕")).on_hover_text("Clear choice").clicked() {
+                            if choice.is_some() && ui.add(small("✕")).on_hover_text("Clear choice").clicked()
+                            {
                                 *choice = None;
                             }
                             if ui
@@ -353,7 +367,14 @@ fn conflict_editor_ui(ui: &mut Ui, e: &mut ConflictEditor, busy: bool, acts: &mu
                         }
                         let mut next = 1;
                         if let Some(base) = &b.base {
-                            if conflict_column(&mut c[1], "Base", base, text_weak(), cur == Some(Choice::Base), true) {
+                            if conflict_column(
+                                &mut c[1],
+                                "Base",
+                                base,
+                                text_weak(),
+                                cur == Some(Choice::Base),
+                                true,
+                            ) {
                                 clicked = Some(Choice::Base);
                             }
                             next = 2;
@@ -383,10 +404,8 @@ fn conflict_editor_ui(ui: &mut Ui, e: &mut ConflictEditor, busy: bool, acts: &mu
                             );
                         }
                         Some(ch) => {
-                            let res = rustle_core::conflict::resolve(
-                                &[Segment::Conflict(b.clone())],
-                                &[Some(ch)],
-                            );
+                            let res =
+                                rustle_core::conflict::resolve(&[Segment::Conflict(b.clone())], &[Some(ch)]);
                             ui.add_space(2.0);
                             conflict_column(ui, "Result", &res, green(), false, false);
                         }
@@ -419,10 +438,10 @@ impl Tab {
             self.msg_prefilled = false;
         } else if !self.msg_prefilled {
             self.msg_prefilled = true;
-            if self.message.trim().is_empty() {
-                if let Some(m) = pending_message(&repo_path) {
-                    self.message = m;
-                }
+            if self.message.trim().is_empty()
+                && let Some(m) = pending_message(&repo_path)
+            {
+                self.message = m;
             }
         }
         let conflicted: Vec<&FileChange> = files.iter().filter(|f| f.conflicted).collect();
@@ -525,16 +544,15 @@ impl Tab {
                                     for f in list.iter().copied() {
                                         let selected =
                                             self.selected_file.as_ref() == Some(&(f.path.clone(), is_staged));
-                                        let (click, resp) =
-                                            file_row(
-                                                ui,
-                                                f,
-                                                is_staged,
-                                                selected,
-                                                busy,
-                                                lfs.contains(&f.path),
-                                                stats.get(&(f.path.clone(), is_staged)).copied(),
-                                            );
+                                        let (click, resp) = file_row(
+                                            ui,
+                                            f,
+                                            is_staged,
+                                            selected,
+                                            busy,
+                                            lfs.contains(&f.path),
+                                            stats.get(&(f.path.clone(), is_staged)).copied(),
+                                        );
                                         match click {
                                             RowClick::Select => {
                                                 acts.push(Act::SelectFile(f.clone(), is_staged))
@@ -628,9 +646,16 @@ impl Tab {
                                     acts.push(Act::Commit);
                                 }
                                 if !self.amend
-                                    && primary_button(ui, &format!("Commit & Push  {}", theme::icon(theme::IC_PUSH, "\u{2191}")), can)
-                                        .on_hover_text("Commit and push the current branch")
-                                        .clicked()
+                                    && primary_button(
+                                        ui,
+                                        &format!(
+                                            "Commit & Push  {}",
+                                            theme::icon(theme::IC_PUSH, "\u{2191}")
+                                        ),
+                                        can,
+                                    )
+                                    .on_hover_text("Commit and push the current branch")
+                                    .clicked()
                                     && can
                                 {
                                     acts.push(Act::CommitPush);
