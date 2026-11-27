@@ -568,7 +568,7 @@ impl Tab {
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 let total = ui.available_size();
-                let left_w = (total.x * 0.36).clamp(320.0, 460.0);
+                let left_w = (total.x * 0.40).clamp(380.0, 560.0);
                 ui.horizontal_top(|ui| {
                     // ---------------------------------------------------------- left column
                     ui.allocate_ui_with_layout(vec2(left_w, total.y), Layout::top_down(Align::Min), |ui| {
@@ -821,12 +821,15 @@ impl Tab {
                             if busy {
                                 ui.spinner();
                             }
-                            ui.label(
+                        });
+                        ui.add(
+                            egui::Label::new(
                                 RichText::new("Ctrl+Enter commit · Space stage/unstage · ↑↓ next file")
                                     .size(11.5)
                                     .color(text_weak()),
-                            );
-                        });
+                            )
+                            .wrap(),
+                        );
                         if let Some(e) = &self.error {
                             let first: String = e.lines().next().unwrap_or("").chars().take(160).collect();
                             ui.colored_label(red(), first);
@@ -869,6 +872,7 @@ impl Tab {
                                 }
                                 ui.label(RichText::new(dir).size(12.0).color(text_weak()));
                                 ui.label(bold(name, 13.5));
+                                ui.end_row();
                                 let mut reload = false;
                                 reload |= ui.checkbox(&mut settings.side_by_side, "Side by side").changed();
                                 reload |= ui
