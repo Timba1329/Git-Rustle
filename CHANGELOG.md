@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.0
+
+- Session restore (tabs come back), keyboard shortcuts overview (`?`), "What's new" after an update,
+  `rustle --commit`, partial clone option.
+- Command palette: search commits by message, recent actions first.
+- Review mode for a branch (per-file "viewed" checkboxes), rebase preview, merge preview.
+- Safety: backups before a hard reset or discard (restore from Repository > Backups), warning for
+  secrets and files over 50 MB before committing, force push lists the commits that would be lost.
+- Search in code changes (`git log -S`), author and date filters under one "Filters" menu.
+- Links: open or copy a link to a commit, branch or file on GitHub/GitLab; ticket links in commit details
+  (set a URL in Settings).
+- Branch colors, accent color presets and a high contrast option; fetch or prune a single remote.
+- Export commits as markdown, text or CSV; commits per week per author in the dashboard.
+- Design: status bar with breadcrumb, busy line, quieter filter bar, cards and section headers,
+  a consistent text scale, layered colors, toasts with icons, visible hover in menus.
+
 ## 0.4.0
 
 - Menu bar (File, Repository, View, Help) with every action and the settings.
