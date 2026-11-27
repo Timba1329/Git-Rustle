@@ -4,7 +4,7 @@
 
 use crate::diffview::{self, DiffAction, StageCtx, ViewExtras};
 use crate::imagediff;
-use crate::panels::{find_bar, status_color};
+use crate::panels::{find_bar, status_icon};
 use crate::settings::Settings;
 use crate::tab::{Act, AppAct, ConflictEditor, Dialog, Tab};
 use crate::theme;
@@ -35,6 +35,36 @@ fn pending_message(repo: &std::path::Path) -> Option<String> {
     None
 }
 
+fn change_tree_ui(
+    ui: &mut Ui,
+    node: &crate::tab::FileTree,
+    prefix: &str,
+    salt: &str,
+    by_path: &std::collections::HashMap<&str, &FileChange>,
+    row: &mut dyn FnMut(&mut Ui, &FileChange),
+) {
+    for (name, child) in &node.dirs {
+        let (mut label, mut cur, mut c) = (name.clone(), format!("{prefix}{name}"), child);
+        while c.files.is_empty() && c.dirs.len() == 1 {
+            let (n, ch) = c.dirs.iter().next().unwrap();
+            label = format!("{label}/{n}");
+            cur = format!("{cur}/{n}");
+            c = ch;
+        }
+        egui::CollapsingHeader::new(RichText::new(label).size(13.0))
+            .id_salt((salt, "cwdir", &cur))
+            .default_open(true)
+            .show(ui, |ui| {
+                change_tree_ui(ui, c, &format!("{cur}/"), salt, by_path, row);
+            });
+    }
+    for (_, full) in &node.files {
+        if let Some(f) = by_path.get(full.as_str()) {
+            row(ui, f);
+        }
+    }
+}
+
 fn status_letter(c: &FileChange, staged: bool) -> char {
     if c.conflicted {
         'U'
@@ -53,6 +83,7 @@ enum RowClick {
     Toggle,
 }
 
+#[allow(clippy::too_many_arguments)]
 /// One compact file row: status letter, name, dimmed folder, and a stage/unstage button.
 fn file_row(
     ui: &mut Ui,
@@ -62,6 +93,7 @@ fn file_row(
     busy: bool,
     is_lfs: bool,
     stat: Option<(u32, u32)>,
+    tree: bool,
 ) -> (RowClick, egui::Response) {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
     let p = ui.painter_at(rect);
@@ -72,13 +104,7 @@ fn file_row(
     }
     let cy = rect.center().y;
     let letter = status_letter(f, is_staged);
-    p.text(
-        pos2(rect.left() + 12.0, cy),
-        Align2::CENTER_CENTER,
-        letter,
-        FontId::monospace(12.0),
-        status_color(letter),
-    );
+    status_icon(&p, pos2(rect.left() + 12.0, cy), letter);
 
     let right_pad = if is_lfs { 62.0 } else { 30.0 } + if stat.is_some() { 80.0 } else { 0.0 };
     if let Some((a, d)) = stat {
@@ -99,6 +125,7 @@ fn file_row(
         );
     }
     let (dir, name) = match f.path.rsplit_once('/') {
+        Some((_, n)) if tree => (String::new(), n),
         Some((d, n)) => (format!("{d}/"), n),
         None => (String::new(), f.path.as_str()),
     };
@@ -474,7 +501,8 @@ impl Tab {
                                 let selected = self.selected_file.as_ref().is_some_and(|(p, _)| *p == f.path);
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 4.0;
-                                    ui.label(RichText::new("U").monospace().color(status_color('U')));
+                                    let (ir, _) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::hover());
+                                    status_icon(ui.painter(), ir.center(), 'U');
                                     if ui.selectable_label(selected, &f.path).clicked() {
                                         acts.push(Act::SelectFile((*f).clone(), false));
                                     }
@@ -541,9 +569,14 @@ impl Tab {
                                     if list.is_empty() {
                                         ui.label(RichText::new("No files").size(12.5).color(text_weak()));
                                     }
-                                    for f in list.iter().copied() {
+                                    let paths: Vec<String> = list.iter().map(|f| f.path.clone()).collect();
+                                    let tree = crate::tab::FileTree::build(&paths);
+                                    let by_path: std::collections::HashMap<&str, &FileChange> =
+                                        list.iter().map(|f| (f.path.as_str(), *f)).collect();
+                                    let selected_file = self.selected_file.clone();
+                                    change_tree_ui(ui, &tree, "", title, &by_path, &mut |ui, f| {
                                         let selected =
-                                            self.selected_file.as_ref() == Some(&(f.path.clone(), is_staged));
+                                            selected_file.as_ref() == Some(&(f.path.clone(), is_staged));
                                         let (click, resp) = file_row(
                                             ui,
                                             f,
@@ -552,6 +585,7 @@ impl Tab {
                                             busy,
                                             lfs.contains(&f.path),
                                             stats.get(&(f.path.clone(), is_staged)).copied(),
+                                            true,
                                         );
                                         match click {
                                             RowClick::Select => {
@@ -565,7 +599,7 @@ impl Tab {
                                             RowClick::None => {}
                                         }
                                         row_menu(&resp, f, is_staged, &repo_path, acts, &mut close);
-                                    }
+                                    });
                                 });
                             ui.add_space(4.0);
                         }

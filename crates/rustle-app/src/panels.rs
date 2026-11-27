@@ -65,6 +65,36 @@ pub fn ctx_item(ui: &mut Ui, label: &str, enabled: bool) -> bool {
     clicked
 }
 
+/// Draws the status of a file as an icon (new, modified, deleted, renamed, conflicted); falls back
+/// to the letter when the icon font is not available.
+pub fn status_icon(p: &egui::Painter, center: egui::Pos2, letter: char) {
+    let color = status_color(letter);
+    let glyph = match letter {
+        'A' | 'N' | '?' => theme::IC_ADD,
+        'D' => theme::IC_DELETE,
+        'R' | 'C' => theme::IC_RENAME,
+        'U' => theme::IC_WARN,
+        _ => theme::IC_EDIT,
+    };
+    if theme::icons_ok() {
+        p.text(
+            center,
+            Align2::CENTER_CENTER,
+            glyph,
+            FontId::proportional(13.0),
+            color,
+        );
+    } else {
+        p.text(
+            center,
+            Align2::CENTER_CENTER,
+            letter,
+            FontId::monospace(12.0),
+            color,
+        );
+    }
+}
+
 pub fn status_color(letter: char) -> Color32 {
     match letter {
         'A' | 'N' => green(),
@@ -1399,13 +1429,7 @@ fn commit_file_row(ui: &mut Ui, f: &CommitFile, selected: bool, name_only: Optio
         p.rect_filled(rect, 3.0, bg_btn());
     }
     let cy = rect.center().y;
-    p.text(
-        pos2(rect.left() + 10.0, cy),
-        Align2::CENTER_CENTER,
-        f.status,
-        FontId::monospace(12.0),
-        status_color(f.status),
-    );
+    status_icon(&p, pos2(rect.left() + 10.0, cy), f.status);
     let (dir, name) = match (name_only, f.path.rsplit_once('/')) {
         (Some(n), _) => (String::new(), n),
         (None, Some((d, n))) => (format!("{d}/"), n),

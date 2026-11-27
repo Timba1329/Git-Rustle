@@ -18,6 +18,11 @@ pub const IC_PUSH: char = '\u{E898}';
 pub const IC_PULL: char = '\u{E896}';
 pub const IC_FETCH: char = '\u{E895}';
 pub const IC_REFRESH: char = '\u{E72C}';
+pub const IC_ADD: char = '\u{E710}';
+pub const IC_EDIT: char = '\u{E70F}';
+pub const IC_DELETE: char = '\u{E74D}';
+pub const IC_RENAME: char = '\u{E8AC}';
+pub const IC_WARN: char = '\u{E7BA}';
 
 pub fn icons_ok() -> bool {
     ICONS_OK.load(Ordering::Relaxed)
