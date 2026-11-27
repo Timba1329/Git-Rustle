@@ -689,9 +689,27 @@ impl Tab {
                         .filter(|b| !pins.contains(&b.name) && !mains.iter().any(|m| m.name == b.name))
                         .collect();
                     let tree = build_btree(&rest);
-                    btree_ui(ui, &tree, "l:", true, 0, &mut |ui, b, label| {
-                        local_branch_row(ui, b, label, busy, &current, false, acts);
-                    });
+                    let mut dir_req: Option<String> = None;
+                    btree_ui(
+                        ui,
+                        &tree,
+                        "l:",
+                        true,
+                        0,
+                        &mut |ui, b, label| {
+                            local_branch_row(ui, b, label, busy, &current, false, acts);
+                        },
+                        Some(&mut dir_req),
+                    );
+                    if let Some(folder) = dir_req {
+                        acts.push(Act::Dialog(Dialog::Input {
+                            title: "New branch".into(),
+                            label: "Branch name".into(),
+                            value: folder,
+                            kind: InputKind::NewBranch,
+                            check: None,
+                        }));
+                    }
 
                     let remotes: Vec<&Branch> = r.branches.iter().filter(|b| b.is_remote).collect();
                     if !remotes.is_empty() {
@@ -700,9 +718,17 @@ impl Tab {
                             .default_open(true)
                             .show(ui, |ui| {
                                 let tree = build_btree(&remotes);
-                                btree_ui(ui, &tree, "r:", false, 0, &mut |ui, b, label| {
-                                    remote_branch_row(ui, b, label, busy, &current, acts);
-                                });
+                                btree_ui(
+                                    ui,
+                                    &tree,
+                                    "r:",
+                                    false,
+                                    0,
+                                    &mut |ui, b, label| {
+                                        remote_branch_row(ui, b, label, busy, &current, acts);
+                                    },
+                                    None,
+                                );
                             });
                     }
                     if !r.tags.is_empty() {

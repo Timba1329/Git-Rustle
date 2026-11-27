@@ -63,13 +63,23 @@ pub fn btree_ui(
     open: bool,
     depth: usize,
     row: &mut dyn FnMut(&mut Ui, &Branch, &str),
+    mut dir_req: Option<&mut Option<String>>,
 ) {
     for (name, child) in &node.dirs {
         let id = format!("{prefix}{name}/");
-        egui::CollapsingHeader::new(RichText::new(name).size(13.0))
+        let r = egui::CollapsingHeader::new(RichText::new(name).size(13.0))
             .id_salt(&id)
             .default_open(open || depth == 0)
-            .show(ui, |ui| btree_ui(ui, child, &id, open, depth + 1, row));
+            .show(ui, |ui| {
+                btree_ui(ui, child, &id, open, depth + 1, row, dir_req.as_deref_mut());
+            });
+        if let Some(req) = dir_req.as_deref_mut() {
+            r.header_response.context_menu(|ui| {
+                if ctx_item(ui, "New branch in this folder…", true) {
+                    *req = Some(id.get(2..).unwrap_or("").to_string());
+                }
+            });
+        }
     }
     for (label, b) in &node.items {
         row(ui, b, label);
@@ -154,6 +164,20 @@ pub fn local_branch_row(
             !busy && !b.is_head && has_up && b.behind > 0 && b.ahead == 0,
         ) {
             acts.push(Act::Send(Request::FastForward(b.name.clone())));
+        }
+        if ctx_item(ui, "New branch in this folder…", true) {
+            let folder = b
+                .name
+                .rsplit_once('/')
+                .map(|(d, _)| format!("{d}/"))
+                .unwrap_or_default();
+            acts.push(Act::Dialog(Dialog::Input {
+                title: "New branch".into(),
+                label: "Branch name".into(),
+                value: folder,
+                kind: InputKind::NewBranch,
+                check: None,
+            }));
         }
         ui.separator();
         if let Some(cur) = current {

@@ -186,6 +186,14 @@ pub struct FileTree {
     pub files: Vec<(String, String)>,
 }
 
+/// The first file in display order (folders before files).
+pub fn first_in_tree(node: &FileTree) -> Option<String> {
+    if let Some((_, c)) = node.dirs.iter().next() {
+        return first_in_tree(c);
+    }
+    node.files.first().map(|(_, p)| p.clone())
+}
+
 impl FileTree {
     pub fn build(paths: &[String]) -> Self {
         let mut root = FileTree::default();
@@ -575,14 +583,25 @@ impl Tab {
         let Some(r) = &self.repo else { return };
         let files = &r.status.files;
         let kept = self.selected_file.as_ref().and_then(|(path, staged)| {
-            files.iter().find(|f| &f.path == path).map(|f| {
-                let still = if *staged { f.is_staged() } else { f.is_unstaged() };
-                (f.clone(), if still { *staged } else { f.is_staged() })
-            })
+            files
+                .iter()
+                .find(|f| &f.path == path)
+                .map(|f| {
+                    let still = if *staged { f.is_staged() } else { f.is_unstaged() };
+                    (f.clone(), if still { *staged } else { f.is_staged() })
+                })
+                .filter(|(_, now_staged)| *staged == *now_staged || *staged)
         });
+        let unstaged_paths: Vec<String> = files
+            .iter()
+            .filter(|f| f.is_unstaged() && !f.conflicted)
+            .map(|f| f.path.clone())
+            .collect();
+        let top_unstaged =
+            first_in_tree(&FileTree::build(&unstaged_paths)).and_then(|p| files.iter().find(|f| f.path == p));
         let pick = kept
             .or_else(|| files.iter().find(|f| f.conflicted).map(|f| (f.clone(), false)))
-            .or_else(|| files.iter().find(|f| f.is_unstaged()).map(|f| (f.clone(), false)))
+            .or_else(|| top_unstaged.map(|f| (f.clone(), false)))
             .or_else(|| files.iter().find(|f| f.is_staged()).map(|f| (f.clone(), true)));
         match pick {
             Some((change, staged)) => self.show_file(change, staged),
