@@ -808,6 +808,183 @@ impl App {
         }
     }
 
+    /// The menu bar at the top of the window: every action and the settings in one place.
+    fn menu_bar(&mut self, ui: &mut Ui, app_acts: &mut Vec<AppAct>) {
+        use Command::*;
+        let ctx = ui.ctx().clone();
+        let has_repo = self.tabs[self.active].repo.is_some();
+        let recent: Vec<PathBuf> = self.recent.paths().iter().take(10).cloned().collect();
+        let mut chosen: Option<Command> = None;
+        let mut palette = false;
+        let mut quit = false;
+        let frame = Frame::new().fill(bg_side()).inner_margin(Margin {
+            left: 6,
+            right: 6,
+            top: 2,
+            bottom: 2,
+        });
+        let item = |ui: &mut Ui, label: &str, hint: &str, enabled: bool| -> bool {
+            let b = egui::Button::new(label).shortcut_text(hint).frame(false);
+            let clicked = ui.add_enabled(enabled, b).clicked();
+            if clicked {
+                ui.close();
+            }
+            clicked
+        };
+        egui::Panel::top("menubar")
+            .frame(frame)
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                egui::MenuBar::new().ui(ui, |ui| {
+                    ui.menu_button("File", |ui| {
+                        ui.set_min_width(230.0);
+                        if item(ui, "Open repository…", "Ctrl+O", true) {
+                            chosen = Some(OpenRepository);
+                        }
+                        if item(ui, "Clone repository…", "", true) {
+                            chosen = Some(CloneRepository);
+                        }
+                        if item(ui, "Create new repository…", "", true) {
+                            chosen = Some(NewRepository);
+                        }
+                        ui.add_enabled_ui(!recent.is_empty(), |ui| {
+                            ui.menu_button("Open recent", |ui| {
+                                for p in &recent {
+                                    let name = crate::panels::folder_name(p);
+                                    if item(ui, &name, "", true) {
+                                        chosen = Some(OpenRecent(p.clone()));
+                                    }
+                                }
+                            });
+                        });
+                        ui.separator();
+                        if item(ui, "New tab", "Ctrl+T", true) {
+                            chosen = Some(NewTab);
+                        }
+                        if item(ui, "Close tab", "Ctrl+W", true) {
+                            chosen = Some(CloseTab);
+                        }
+                        ui.separator();
+                        if item(ui, "Settings…", "Ctrl+,", true) {
+                            chosen = Some(Settings);
+                        }
+                        ui.separator();
+                        if item(ui, "Exit", "", true) {
+                            quit = true;
+                        }
+                    });
+                    ui.menu_button("Repository", |ui| {
+                        ui.set_min_width(260.0);
+                        if item(ui, "Fetch", "", has_repo) {
+                            chosen = Some(Fetch);
+                        }
+                        if item(ui, "Pull", "", has_repo) {
+                            chosen = Some(Pull);
+                        }
+                        if item(ui, "Push", "", has_repo) {
+                            chosen = Some(Push);
+                        }
+                        if item(ui, "Force push (with lease)…", "", has_repo) {
+                            chosen = Some(ForcePush);
+                        }
+                        if item(ui, "Refresh", "F5", has_repo) {
+                            chosen = Some(Refresh);
+                        }
+                        ui.separator();
+                        if item(ui, "Commit changes…", "", has_repo) {
+                            chosen = Some(Commit);
+                        }
+                        if item(ui, "Stash changes…", "", has_repo) {
+                            chosen = Some(Stash);
+                        }
+                        if item(ui, "New branch…", "", has_repo) {
+                            chosen = Some(NewBranch);
+                        }
+                        ui.separator();
+                        if item(ui, "Continue merge / rebase / cherry-pick", "", has_repo) {
+                            chosen = Some(ContinueOperation);
+                        }
+                        if item(ui, "Abort merge / rebase / cherry-pick…", "", has_repo) {
+                            chosen = Some(AbortOperation);
+                        }
+                        ui.separator();
+                        if item(ui, "Add worktree…", "", has_repo) {
+                            chosen = Some(AddWorktree);
+                        }
+                        if item(ui, "Update all submodules", "", has_repo) {
+                            chosen = Some(UpdateSubmodules);
+                        }
+                        if item(ui, "Track files with Git LFS…", "", has_repo) {
+                            chosen = Some(TrackLfs);
+                        }
+                        ui.separator();
+                        if item(ui, "Open in Explorer", "", has_repo) {
+                            chosen = Some(OpenExplorer);
+                        }
+                        if item(ui, "Open in terminal", "", has_repo) {
+                            chosen = Some(OpenTerminal);
+                        }
+                        if item(ui, "Open in editor", "", has_repo) {
+                            chosen = Some(OpenEditor);
+                        }
+                        ui.separator();
+                        if item(ui, "Repository settings…", "", has_repo) {
+                            chosen = Some(RepoSettings);
+                        }
+                    });
+                    ui.menu_button("View", |ui| {
+                        ui.set_min_width(250.0);
+                        if item(ui, "Branches and tags", "", has_repo) {
+                            chosen = Some(ShowRefs);
+                        }
+                        if item(ui, "File browser", "", has_repo) {
+                            chosen = Some(ShowFiles);
+                        }
+                        if item(ui, "Search commits", "Ctrl+F", has_repo) {
+                            chosen = Some(SearchCommits);
+                        }
+                        if item(ui, "Reflog", "", has_repo) {
+                            chosen = Some(Reflog);
+                        }
+                        ui.separator();
+                        if item(ui, "Side-by-side diffs", "", true) {
+                            chosen = Some(ToggleSideBySide);
+                        }
+                        if item(ui, "Ignore whitespace in diffs", "", true) {
+                            chosen = Some(ToggleIgnoreWhitespace);
+                        }
+                        if item(ui, "Toggle dark / light theme", "", true) {
+                            chosen = Some(ToggleTheme);
+                        }
+                        ui.separator();
+                        if item(ui, "Command palette…", "Ctrl+K", true) {
+                            palette = true;
+                        }
+                    });
+                    ui.menu_button("Help", |ui| {
+                        if item(ui, "Check for updates", "", true) {
+                            chosen = Some(CheckUpdates);
+                        }
+                        if item(ui, "About Rustle", "", true) {
+                            chosen = Some(About);
+                        }
+                    });
+                });
+            });
+        if palette {
+            self.palette = Some(PaletteState {
+                query: String::new(),
+                selected: 0,
+            });
+        }
+        if quit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if let Some(cmd) = chosen {
+            self.run_command(&ctx, cmd, app_acts);
+        }
+    }
+
     fn tab_bar(&mut self, ui: &mut Ui, acts: &mut Vec<AppAct>) {
         let frame = Frame::new().fill(bg_side()).inner_margin(Margin {
             left: 8,
@@ -1314,6 +1491,7 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_secs(20));
         }
 
+        self.menu_bar(ui, &mut app_acts);
         self.tab_bar(ui, &mut app_acts);
 
         let mut acts: Vec<Act> = Vec::new();
