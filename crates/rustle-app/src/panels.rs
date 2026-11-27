@@ -20,7 +20,7 @@ use rustle_core::{Branch, Commit, CommitFile, GraphRow, OpState, RefKind, TodoAc
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-const LANE_W: f32 = 14.0;
+const LANE_W: f32 = 12.0;
 const ROW_H: f32 = 26.0;
 
 fn lane_color(i: usize) -> Color32 {
@@ -1432,17 +1432,25 @@ fn commit_file_row(ui: &mut Ui, f: &CommitFile, selected: bool, name_only: Optio
 fn draw_graph(p: &egui::Painter, rect: Rect, row: &GraphRow, is_merge: bool, bg: Color32) {
     let x = |l: usize| rect.left() + 6.0 + l as f32 * LANE_W + LANE_W / 2.0;
     let mid = rect.center().y;
+    let curve = |from: egui::Pos2, to: egui::Pos2, color: usize| {
+        let stroke = Stroke::new(1.6, lane_color(color));
+        if (from.x - to.x).abs() < 0.5 {
+            p.line_segment([from, to], stroke);
+        } else {
+            let my = (from.y + to.y) / 2.0;
+            p.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                [from, pos2(from.x, my), pos2(to.x, my), to],
+                false,
+                Color32::TRANSPARENT,
+                stroke,
+            ));
+        }
+    };
     for s in &row.top {
-        p.line_segment(
-            [pos2(x(s.from), rect.top()), pos2(x(s.to), mid)],
-            Stroke::new(1.6, lane_color(s.color)),
-        );
+        curve(pos2(x(s.from), rect.top()), pos2(x(s.to), mid), s.color);
     }
     for s in &row.bottom {
-        p.line_segment(
-            [pos2(x(s.from), mid), pos2(x(s.to), rect.bottom())],
-            Stroke::new(1.6, lane_color(s.color)),
-        );
+        curve(pos2(x(s.from), mid), pos2(x(s.to), rect.bottom()), s.color);
     }
     let c = pos2(x(row.col), mid);
     let color = lane_color(row.color);

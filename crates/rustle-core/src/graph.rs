@@ -40,6 +40,22 @@ fn alloc(lanes: &mut Lanes) -> usize {
     }
 }
 
+/// Free lane closest to `near`; a new lane at the end when all are taken.
+fn alloc_near(lanes: &mut Lanes, near: usize) -> usize {
+    let best = lanes
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.is_none())
+        .min_by_key(|(i, _)| i.abs_diff(near))
+        .map(|(i, _)| i);
+    if let Some(i) = best {
+        i
+    } else {
+        lanes.push(None);
+        lanes.len() - 1
+    }
+}
+
 pub fn build_graph(commits: &[Commit]) -> Graph {
     let mut lanes: Lanes = Vec::new();
     let mut next_color = 0usize;
@@ -107,7 +123,7 @@ pub fn build_graph(commits: &[Commit]) -> Graph {
                 let (j, cl) = if pi == 0 {
                     (col, color)
                 } else {
-                    let j = alloc(&mut lanes);
+                    let j = alloc_near(&mut lanes, col);
                     next_color += 1;
                     (j, next_color - 1)
                 };
@@ -124,6 +140,25 @@ pub fn build_graph(commits: &[Commit]) -> Graph {
             lanes.pop();
         }
         width = width.max(before).max(lanes.len()).max(col + 1);
+
+        // Close gaps: lanes move left into free slots so the graph stays as narrow as possible.
+        let mut moved: Vec<(usize, usize)> = Vec::new();
+        for j in 0..lanes.len() {
+            if lanes[j].is_some()
+                && let Some(i) = lanes[..j].iter().position(Option::is_none)
+            {
+                lanes[i] = lanes[j].take();
+                moved.push((j, i));
+            }
+        }
+        while matches!(lanes.last(), Some(None)) {
+            lanes.pop();
+        }
+        for s in &mut row.bottom {
+            if let Some(&(_, n)) = moved.iter().find(|(o, _)| *o == s.to) {
+                s.to = n;
+            }
+        }
         rows.push(row);
     }
     Graph { rows, width }
