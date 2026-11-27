@@ -1192,37 +1192,42 @@ impl Tab {
                 }
                 let files_w = 260.0;
                 ui.horizontal_top(|ui| {
-                    ui.allocate_ui(vec2(files_w, ui.available_height()), |ui| {
-                        ui.set_width(files_w);
-                        egui::ScrollArea::vertical()
-                            .id_salt("cfiles")
-                            .auto_shrink(false)
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 0.0;
-                                let total_a: u32 = self.commit_files.iter().filter_map(|f| f.added).sum();
-                                let total_d: u32 = self.commit_files.iter().filter_map(|f| f.deleted).sum();
-                                let all_sel = self.selected_cfile.as_deref() == Some("");
-                                let r = all_rows(ui, self.commit_files.len(), total_a, total_d, all_sel);
-                                if r.clicked() {
-                                    acts.push(Act::SelectCommitFile(String::new()));
-                                }
-                                let paths: Vec<String> =
-                                    self.commit_files.iter().map(|f| f.path.clone()).collect();
-                                let tree = crate::tab::FileTree::build(&paths);
-                                let by_path: std::collections::HashMap<&str, &CommitFile> =
-                                    self.commit_files.iter().map(|f| (f.path.as_str(), f)).collect();
-                                let rev = self.selected_id.clone();
-                                commit_tree_ui(
-                                    ui,
-                                    &tree,
-                                    "",
-                                    &by_path,
-                                    self.selected_cfile.as_deref(),
-                                    &rev,
-                                    acts,
-                                );
-                            });
-                    });
+                    ui.allocate_ui_with_layout(
+                        vec2(files_w, ui.available_height()),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.set_width(files_w);
+                            egui::ScrollArea::vertical()
+                                .id_salt("cfiles")
+                                .auto_shrink(false)
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing.y = 0.0;
+                                    let total_a: u32 = self.commit_files.iter().filter_map(|f| f.added).sum();
+                                    let total_d: u32 =
+                                        self.commit_files.iter().filter_map(|f| f.deleted).sum();
+                                    let all_sel = self.selected_cfile.as_deref() == Some("");
+                                    let r = all_rows(ui, self.commit_files.len(), total_a, total_d, all_sel);
+                                    if r.clicked() {
+                                        acts.push(Act::SelectCommitFile(String::new()));
+                                    }
+                                    let paths: Vec<String> =
+                                        self.commit_files.iter().map(|f| f.path.clone()).collect();
+                                    let tree = crate::tab::FileTree::build(&paths);
+                                    let by_path: std::collections::HashMap<&str, &CommitFile> =
+                                        self.commit_files.iter().map(|f| (f.path.as_str(), f)).collect();
+                                    let rev = self.selected_id.clone();
+                                    commit_tree_ui(
+                                        ui,
+                                        &tree,
+                                        "",
+                                        &by_path,
+                                        self.selected_cfile.as_deref(),
+                                        &rev,
+                                        acts,
+                                    );
+                                });
+                        },
+                    );
                     ui.separator();
                     ui.vertical(|ui| {
                         let binary = self.commit_diff.as_ref().is_some_and(DiffView::is_binary);
