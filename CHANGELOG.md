@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0
+
+- Commit details: all changed files in a folder tree, an "All files" diff, and added/removed line counts
+  per file (also in the commit window).
+- Branches: pin favourites to the top, main/master first, branches with `/` grouped in folders.
+- "Commit & Push" button; the merge message is prefilled and used when continuing a merge.
+- Conflict editor: click a side to choose, "theirs + ours", live result per block, previous/next and
+  "next unresolved" navigation.
+- Icons for push, pull, fetch and refresh; clearer hover highlights and pointer cursors.
+
 ## 0.2.0
 
 - Live updates: file watcher for the working tree and refs; "Working changes" row in the graph.
