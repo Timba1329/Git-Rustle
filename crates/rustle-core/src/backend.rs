@@ -1,8 +1,8 @@
 use crate::error::{GitError, Result};
 use crate::model::{
-    BlameLine, Branch, Commit, CommitFile, ConflictVersions, DiffOpts, FileChange, LogQuery, OpResult,
-    OpState, PatchMode, PullMode, ReflogEntry, ResetMode, Side, StashEntry, Status, Submodule, TodoAction,
-    TodoItem,
+    BlameLine, Branch, BranchAge, Commit, CommitFile, ConflictVersions, Dashboard, DiffOpts, FileChange,
+    LogQuery, OpResult, OpState, PatchMode, PullMode, ReflogEntry, ResetMode, Side, StashEntry, Status,
+    Submodule, TodoAction, TodoItem,
 };
 use crate::parse::log::{LOG_FORMAT, parse_log};
 use crate::parse::status::parse_status;
@@ -184,6 +184,12 @@ impl CliBackend {
         }
         if let Some(a) = &q.author {
             args.push(format!("--author={a}"));
+        }
+        if let Some(d) = &q.since {
+            args.push(format!("--since={d}"));
+        }
+        if let Some(d) = &q.until {
+            args.push(format!("--until={d}"));
         }
         if !q.revs.is_empty() && q.path.is_none() {
             args.extend(q.revs.iter().cloned());
@@ -1108,6 +1114,185 @@ impl CliBackend {
                 "pull requests are supported for GitHub and GitLab, not {host}"
             )))
         }
+    }
+
+    /// Commits the staged changes as a fixup of `id` and folds it into that commit.
+    pub fn fixup_into(&self, id: &str) -> Result<OpResult> {
+        self.git(&["commit", "-q", &format!("--fixup={id}")])?;
+        let base = format!("{id}^");
+        let has_parent = self.git(&["rev-parse", "--verify", "-q", &base]).is_ok();
+        let mut args = strs(&["rebase", "-i", "--autosquash", "--autostash"]);
+        if has_parent {
+            args.push(base);
+        } else {
+            args.push("--root".into());
+        }
+        let r = self.runner.run_opts(
+            &args,
+            Some(&self.repo),
+            &RunOpts {
+                env: &[("GIT_SEQUENCE_EDITOR", "true")],
+                ..Default::default()
+            },
+        );
+        self.finish(r)
+    }
+
+    pub fn bisect_start(&self, bad: &str, good: &str) -> Result<String> {
+        self.git(&["bisect", "start"])?;
+        self.git(&["bisect", "bad", bad])?;
+        let out = self.git(&["bisect", "good", good])?;
+        Ok(lossy(&out.stdout))
+    }
+
+    /// `mark` is `good`, `bad` or `skip`.
+    pub fn bisect_mark(&self, mark: &str) -> Result<String> {
+        let out = self.git(&["bisect", mark])?;
+        Ok(lossy(&out.stdout))
+    }
+
+    pub fn bisect_reset(&self) -> Result<()> {
+        self.git(&["bisect", "reset"])?;
+        Ok(())
+    }
+
+    pub fn delete_remote_tag(&self, tag: &str) -> Result<()> {
+        self.git(&["push", "origin", "--delete", &format!("refs/tags/{tag}")])?;
+        Ok(())
+    }
+
+    /// The annotation of a tag (or the commit message for a lightweight tag).
+    pub fn tag_message(&self, tag: &str) -> Result<String> {
+        let out = self.git(&[
+            "for-each-ref",
+            &format!("refs/tags/{tag}"),
+            "--format=%(contents)",
+        ])?;
+        Ok(lossy(&out.stdout).trim().to_string())
+    }
+
+    /// Stops tracking files but keeps them on disk (`git rm --cached`).
+    pub fn untrack(&self, paths: &[String]) -> Result<()> {
+        let args = strs(&["rm", "--cached", "-r", "-q"]);
+        self.git(&with_paths(args, paths))?;
+        Ok(())
+    }
+
+    pub fn export_patch(&self, id: &str, dest: &Path) -> Result<()> {
+        let out = self.git(&["format-patch", "-1", "--stdout", id])?;
+        std::fs::write(dest, &out.stdout)?;
+        Ok(())
+    }
+
+    pub fn apply_patch_file(&self, file: &Path) -> Result<()> {
+        let mut args: Vec<std::ffi::OsString> = strs(&["apply", "--3way", "--whitespace=nowarn"])
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        args.push(file.as_os_str().to_owned());
+        self.git(&args)?;
+        Ok(())
+    }
+
+    /// Local and remote branches that contain the commit.
+    pub fn containing_branches(&self, id: &str) -> Result<Vec<String>> {
+        let out = self.git(&["branch", "-a", "--contains", id, "--format=%(refname:short)"])?;
+        Ok(lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|n| !n.is_empty() && !n.ends_with("/HEAD") && *n != "origin")
+            .take(40)
+            .map(str::to_string)
+            .collect())
+    }
+
+    pub fn stash_show(&self, index: usize) -> Result<String> {
+        let out = self.git(&[
+            "stash",
+            "show",
+            "-p",
+            "--include-untracked",
+            &format!("stash@{{{index}}}"),
+        ])?;
+        Ok(text(&out.stdout))
+    }
+
+    /// Opens the configured external merge tool for a conflicted file.
+    pub fn mergetool(&self, path: &str) -> Result<()> {
+        let args = strs(&["mergetool", "--no-prompt"]);
+        self.git(&with_paths(args, &[path.to_string()]))?;
+        Ok(())
+    }
+
+    /// Overview of branch ages and file sizes; `stale_days` is the age that makes a branch stale.
+    pub fn dashboard(&self, stale_days: i64) -> Result<Dashboard> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+        let merged: std::collections::HashSet<String> = self
+            .git(&["branch", "-a", "--merged", "HEAD", "--format=%(refname:short)"])
+            .map(|o| lossy(&o.stdout).lines().map(|l| l.trim().to_string()).collect())
+            .unwrap_or_default();
+        let refs = self.git(&[
+            "for-each-ref",
+            "--format=%(refname)%1f%(committerdate:unix)",
+            "refs/heads",
+            "refs/remotes",
+        ])?;
+        let protected = ["main", "master", "develop", "dev", "test", "staging"];
+        let (mut branches, mut stale) = (0, Vec::new());
+        for line in lossy(&refs.stdout).lines() {
+            let Some((full, ts)) = line.split_once('\x1f') else {
+                continue;
+            };
+            let name = full
+                .strip_prefix("refs/heads/")
+                .or_else(|| full.strip_prefix("refs/remotes/"))
+                .unwrap_or(full);
+            if name.ends_with("/HEAD") {
+                continue;
+            }
+            branches += 1;
+            let unix: i64 = ts.trim().parse().unwrap_or(now);
+            let tail = name.rsplit('/').next().unwrap_or(name);
+            if now - unix > stale_days * 86_400 && !protected.contains(&tail) {
+                stale.push(BranchAge {
+                    name: name.to_string(),
+                    unix,
+                    merged: merged.contains(name),
+                });
+            }
+        }
+        stale.sort_by_key(|b| b.unix);
+        stale.truncate(60);
+
+        let tree = self
+            .git(&["ls-tree", "-r", "-l", "HEAD"])
+            .map(|o| o.stdout)
+            .unwrap_or_default();
+        let mut files: Vec<(String, u64)> = Vec::new();
+        for l in lossy(&tree).lines() {
+            if let Some((meta, path)) = l.split_once('\t')
+                && let Some(size) = meta.split_whitespace().nth(3).and_then(|s| s.parse::<u64>().ok())
+            {
+                files.push((path.to_string(), size));
+            }
+        }
+        let tracked_files = files.len();
+        files.sort_by_key(|f| std::cmp::Reverse(f.1));
+        files.truncate(15);
+        let commits = self
+            .git(&["rev-list", "--count", "HEAD"])
+            .ok()
+            .and_then(|o| lossy(&o.stdout).trim().parse().ok())
+            .unwrap_or(0);
+        Ok(Dashboard {
+            commits,
+            branches,
+            tracked_files,
+            stale,
+            big_files: files,
+        })
     }
 
     pub fn stash_files(&self, paths: &[String], message: &str) -> Result<()> {

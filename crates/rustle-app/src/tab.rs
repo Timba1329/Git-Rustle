@@ -120,6 +120,12 @@ pub enum Act {
     },
     SelectCommitFile(String),
     TogglePin(String),
+    GoToId(String),
+    GoToHead,
+    BisectPick {
+        id: String,
+        bad: bool,
+    },
     GraphOnly(Option<String>),
     CommitPush,
     SelectFile(FileChange, bool),
@@ -265,6 +271,20 @@ pub struct Tab {
     pub commit_files: Vec<CommitFile>,
     pub selected_cfile: Option<String>,
     pub pins: Vec<String>,
+    pub bisect_pick: Option<(String, bool)>,
+    pub view_range: (usize, usize),
+    pub compare_view: Option<crate::windows::CompareView>,
+    pub dashboard: Option<rustle_core::Dashboard>,
+    pub hooks_open: bool,
+    pub bisect: Option<(String, bool)>,
+    pub stash_view: Option<crate::windows::StashView>,
+    pub stash_side_by_side: bool,
+    pub toast: Option<(String, Instant)>,
+    pub containing: Option<(String, Vec<String>)>,
+    pub change_idx: usize,
+    pub since: String,
+    pub until: String,
+    pub scroll_to_commit: Option<usize>,
     pub graph_refs: Vec<String>,
     pub last_checkout: Option<rustle_core::Branch>,
     pub msg_prefix: String,
@@ -397,6 +417,20 @@ impl Tab {
             commit_files: Vec::new(),
             selected_cfile: None,
             pins: Vec::new(),
+            bisect_pick: None,
+            view_range: (0, 0),
+            compare_view: None,
+            dashboard: None,
+            hooks_open: false,
+            bisect: None,
+            stash_view: None,
+            stash_side_by_side: false,
+            toast: None,
+            containing: None,
+            change_idx: 0,
+            since: String::new(),
+            until: String::new(),
+            scroll_to_commit: None,
             graph_refs: Vec::new(),
             last_checkout: None,
             msg_prefix: String::new(),
@@ -502,6 +536,8 @@ impl Tab {
             path: self.path_filter.clone(),
             current_branch_only: self.branch_only,
             revs: self.graph_refs.clone(),
+            since: opt(&self.since),
+            until: opt(&self.until),
             ..Default::default()
         }
     }
@@ -924,6 +960,46 @@ impl Tab {
                     };
                 }
                 Response::OpenUrl(url) => self.ctx.open_url(egui::OpenUrl::new_tab(url)),
+                Response::BranchCompare {
+                    a,
+                    b,
+                    only_a,
+                    only_b,
+                    files,
+                } => {
+                    self.compare_view = Some(crate::windows::CompareView {
+                        a,
+                        b,
+                        only_a,
+                        only_b,
+                        files,
+                    });
+                }
+                Response::Dashboard(d) => self.dashboard = Some(*d),
+                Response::Containing { id, branches } => {
+                    if self.selected_id.as_deref() == Some(id.as_str()) {
+                        self.containing = Some((id, branches));
+                    }
+                }
+                Response::StashPatch { index, text } => {
+                    let dark = settings.theme == ThemeMode::Dark;
+                    self.stash_side_by_side = settings.side_by_side;
+                    self.stash_view = Some((
+                        index,
+                        DiffView::build(format!("stash@{{{index}}}"), &text, dark),
+                        HashSet::new(),
+                    ));
+                }
+                Response::TagMessage { tag, text } => {
+                    self.details = Some(format!("{tag}\n\n{text}"));
+                }
+                Response::Bisect { text, active } => {
+                    self.bisect = if text.is_empty() && !active {
+                        None
+                    } else {
+                        Some((text, active))
+                    };
+                }
                 Response::Remotes(r) => {
                     self.remote_edit = r.iter().map(|x| x.fetch_url.clone()).collect();
                     self.remotes = Some(r);
@@ -985,10 +1061,12 @@ impl Tab {
                 }
                 Response::AutoFetch(r) => self.auto_fetch_error = r.err(),
                 Response::Info(m) => {
+                    self.toast = Some((m.clone(), Instant::now()));
                     self.info = Some(m);
                     self.error = None;
                 }
                 Response::Error(e) => {
+                    self.toast = Some((format!("⚠ {e}"), Instant::now()));
                     self.push_after = false;
                     if let Some(b) = self.last_checkout.take()
                         && (e.contains("would be overwritten") || e.contains("commit your changes or stash"))
@@ -1032,6 +1110,53 @@ impl Tab {
             .collect();
         v.sort_by_key(|(i, _)| *i);
         v
+    }
+
+    fn dialog_is_open(&self) -> bool {
+        !matches!(self.dialog, Dialog::None)
+    }
+
+    /// Selects the commit with this id (when it is loaded) and scrolls it into view.
+    pub fn go_to_id(&mut self, id: &str) {
+        let Some(idx) = self
+            .repo
+            .as_ref()
+            .and_then(|r| r.commits.iter().position(|c| c.id == id))
+        else {
+            self.toast = Some(("That commit is not in the loaded history".into(), Instant::now()));
+            return;
+        };
+        self.select_commit(idx, false, false);
+        self.scroll_to_commit = Some(idx);
+    }
+
+    /// Moves the selection with the arrow keys or j/k.
+    pub fn commit_keys(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() || self.commit_open || self.dialog_is_open() {
+            return;
+        }
+        let (down, up) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::J),
+                i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::K),
+            )
+        });
+        let Some(cur) = self.selected else {
+            return;
+        };
+        let n = self.repo.as_ref().map_or(0, |r| r.commits.len());
+        let target = if down && cur + 1 < n {
+            cur + 1
+        } else if up && cur > 0 {
+            cur - 1
+        } else {
+            return;
+        };
+        self.select_commit(target, false, false);
+        let (first, last) = self.view_range;
+        if target < first + 1 || target + 3 > last {
+            self.scroll_to_commit = Some(target);
+        }
     }
 
     fn select_commit(&mut self, idx: usize, ctrl: bool, shift: bool) {
@@ -1113,6 +1238,8 @@ impl Tab {
             self.detail_key = id.clone();
             self.selected = Some(idx);
             self.selected_id = Some(id.clone());
+            self.send(Request::ContainingBranches(id.clone()));
+            self.containing = None;
             self.send(Request::CommitInfo(id));
         }
     }
@@ -1400,10 +1527,59 @@ impl Tab {
                 }
                 Act::Diff(a) => self.diff_action(a),
                 Act::Dialog(d) => self.dialog = d,
-                Act::ApplyQuery => self.apply_query(),
+                Act::ApplyQuery => {
+                    let q = self.search.trim().to_lowercase();
+                    let hash_like = q.len() >= 6 && q.chars().all(|c| c.is_ascii_hexdigit());
+                    let hit = hash_like
+                        .then(|| {
+                            self.repo.as_ref().and_then(|r| {
+                                r.commits
+                                    .iter()
+                                    .find(|c| c.id.starts_with(&q))
+                                    .map(|c| c.id.clone())
+                            })
+                        })
+                        .flatten();
+                    if let Some(id) = hit {
+                        self.search.clear();
+                        self.go_to_id(&id);
+                    } else {
+                        self.apply_query();
+                    }
+                }
+                Act::GoToId(id) => self.go_to_id(&id),
+                Act::GoToHead => {
+                    if let Some(id) = self.repo.as_ref().and_then(|r| r.head_id.clone()) {
+                        self.go_to_id(&id);
+                    }
+                }
+                Act::BisectPick { id, bad } => match self.bisect_pick.take() {
+                    Some((other, other_bad)) if other_bad != bad && other != id => {
+                        let (bad_id, good_id) = if bad { (id, other) } else { (other, id) };
+                        self.send(Request::BisectStart {
+                            bad: bad_id,
+                            good: good_id,
+                        });
+                    }
+                    _ => {
+                        self.toast = Some((
+                            format!(
+                                "Marked {} as {}. Now mark a {} commit.",
+                                &id[..id.len().min(7)],
+                                if bad { "bad" } else { "good" },
+                                if bad { "good" } else { "bad" }
+                            ),
+                            Instant::now(),
+                        ));
+                        self.bisect_pick = Some((id, bad));
+                    }
+                },
                 Act::ClearQuery => {
                     self.search.clear();
                     self.author.clear();
+                    self.since.clear();
+                    self.until.clear();
+                    self.graph_refs.clear();
                     self.path_filter = None;
                     self.branch_only = false;
                     self.apply_query();

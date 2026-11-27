@@ -18,8 +18,9 @@ pub use diffparse::{
 pub use error::GitError;
 pub use graph::{Graph, GraphRow, Seg, build_graph};
 pub use model::{
-    BlameLine, Branch, Commit, CommitFile, ConfigValue, ConflictVersions, DiffOpts, FileChange, GrepHit,
-    LfsInfo, LogQuery, OpResult, OpState, PatchMode, PullMode, RefKind, RefLabel, ReflogEntry, Remote,
-    ResetMode, Side, SignatureInfo, StashEntry, Status, Submodule, TodoAction, TodoItem, Worktree,
+    BlameLine, Branch, BranchAge, Commit, CommitFile, ConfigValue, ConflictVersions, Dashboard, DiffOpts,
+    FileChange, GrepHit, LfsInfo, LogQuery, OpResult, OpState, PatchMode, PullMode, RefKind, RefLabel,
+    ReflogEntry, Remote, ResetMode, Side, SignatureInfo, StashEntry, Status, Submodule, TodoAction, TodoItem,
+    Worktree,
 };
 pub use runner::{CancelToken, GitRunner, RunOpts};

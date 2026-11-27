@@ -251,6 +251,29 @@ pub enum Request {
     UndoLast,
     CheckoutStashed(rustle_core::Branch),
     PullRequestUrl(String),
+    Fixup(String),
+    BisectStart {
+        bad: String,
+        good: String,
+    },
+    BisectMark(String),
+    BisectReset,
+    DeleteRemoteTag(String),
+    TagMessage(String),
+    Untrack(Vec<String>),
+    ExportPatch {
+        id: String,
+        path: PathBuf,
+    },
+    ApplyPatchFile(PathBuf),
+    Dashboard,
+    ContainingBranches(String),
+    StashShow(usize),
+    Mergetool(String),
+    BranchCompare {
+        a: String,
+        b: String,
+    },
     StashApply(usize),
     StashPop(usize),
     StashDrop(usize),
@@ -337,6 +360,30 @@ pub enum Response {
         email: Option<String>,
     },
     Committed,
+    BranchCompare {
+        a: String,
+        b: String,
+        only_a: Vec<Commit>,
+        only_b: Vec<Commit>,
+        files: Vec<CommitFile>,
+    },
+    Dashboard(Box<rustle_core::Dashboard>),
+    Containing {
+        id: String,
+        branches: Vec<String>,
+    },
+    StashPatch {
+        index: usize,
+        text: String,
+    },
+    TagMessage {
+        tag: String,
+        text: String,
+    },
+    Bisect {
+        text: String,
+        active: bool,
+    },
     MergedBranches {
         names: Vec<String>,
         remote: bool,
@@ -974,6 +1021,84 @@ impl State {
             }
             Request::PullRequestUrl(branch) => {
                 vec![Response::OpenUrl(self.be()?.pull_request_url(&branch)?)]
+            }
+            Request::Fixup(id) => {
+                let r = self.be()?.fixup_into(&id)?;
+                vec![msg(r, "Folded into the commit"), snap(self)?]
+            }
+            Request::BisectStart { bad, good } => {
+                let text = self.be()?.bisect_start(&bad, &good)?;
+                vec![Response::Bisect { text, active: true }, snap(self)?]
+            }
+            Request::BisectMark(mark) => {
+                let text = self.be()?.bisect_mark(&mark)?;
+                let active = !text.contains("is the first bad commit");
+                vec![Response::Bisect { text, active }, snap(self)?]
+            }
+            Request::BisectReset => {
+                self.be()?.bisect_reset()?;
+                vec![
+                    Response::Bisect {
+                        text: String::new(),
+                        active: false,
+                    },
+                    snap(self)?,
+                ]
+            }
+            Request::DeleteRemoteTag(tag) => {
+                self.be()?.delete_remote_tag(&tag)?;
+                vec![Response::Info(format!("Deleted {tag} on the remote"))]
+            }
+            Request::TagMessage(tag) => {
+                let text = self.be()?.tag_message(&tag)?;
+                vec![Response::TagMessage { tag, text }]
+            }
+            Request::Untrack(paths) => {
+                self.be()?.untrack(&paths)?;
+                vec![
+                    Response::Info("No longer tracked (the files stay on disk)".into()),
+                    snap(self)?,
+                ]
+            }
+            Request::ExportPatch { id, path } => {
+                self.be()?.export_patch(&id, &path)?;
+                vec![Response::Info(format!("Patch saved to {}", path.display()))]
+            }
+            Request::ApplyPatchFile(path) => {
+                self.be()?.apply_patch_file(&path)?;
+                vec![Response::Info("Patch applied".into()), snap(self)?]
+            }
+            Request::Dashboard => vec![Response::Dashboard(Box::new(self.be()?.dashboard(30)?))],
+            Request::ContainingBranches(id) => {
+                let branches = self.be()?.containing_branches(&id)?;
+                vec![Response::Containing { id, branches }]
+            }
+            Request::StashShow(index) => {
+                let text = self.be()?.stash_show(index)?;
+                vec![Response::StashPatch { index, text }]
+            }
+            Request::Mergetool(path) => {
+                self.be()?.mergetool(&path)?;
+                vec![Response::Info("Merge tool finished".into()), snap(self)?]
+            }
+            Request::BranchCompare { a, b } => {
+                let be = self.be()?;
+                let only_a = be.log_query(&LogQuery {
+                    revs: vec![format!("{b}..{a}")],
+                    ..LogQuery::all(300)
+                })?;
+                let only_b = be.log_query(&LogQuery {
+                    revs: vec![format!("{a}..{b}")],
+                    ..LogQuery::all(300)
+                })?;
+                let files = be.compare_files(&a, &b)?;
+                vec![Response::BranchCompare {
+                    a,
+                    b,
+                    only_a,
+                    only_b,
+                    files,
+                }]
             }
             Request::StashApply(i) => {
                 let r = self.be()?.stash_apply(i)?;

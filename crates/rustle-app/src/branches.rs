@@ -200,6 +200,12 @@ pub fn local_branch_row(
         }
         ui.separator();
         if let Some(cur) = current {
+            if ctx_item(ui, &format!("Compare with {cur}"), !b.is_head) {
+                acts.push(Act::Send(Request::BranchCompare {
+                    a: b.name.clone(),
+                    b: cur.clone(),
+                }));
+            }
             if ctx_item(ui, &format!("Preview merge into {cur}"), !b.is_head) {
                 acts.push(Act::Send(Request::MergePreview(b.name.clone())));
             }
@@ -259,6 +265,12 @@ pub fn remote_branch_row(
             acts.push(Act::Send(Request::Checkout(b.clone())));
         }
         if let Some(cur) = current {
+            if ctx_item(ui, &format!("Compare with {cur}"), true) {
+                acts.push(Act::Send(Request::BranchCompare {
+                    a: b.name.clone(),
+                    b: cur.clone(),
+                }));
+            }
             if ctx_item(ui, &format!("Preview merge into {cur}"), true) {
                 acts.push(Act::Send(Request::MergePreview(b.name.clone())));
             }

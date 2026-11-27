@@ -133,3 +133,119 @@ fn log_can_be_limited_to_chosen_branches() {
     let subjects: Vec<String> = b.log_query(&q).unwrap().into_iter().map(|c| c.subject).collect();
     assert_eq!(subjects, ["side work", "base"]);
 }
+
+#[test]
+fn fixup_folds_staged_changes_into_an_older_commit() {
+    let d = tempfile::tempdir().unwrap();
+    init(d.path());
+    commit_file(d.path(), "a.txt", "1\n", "first");
+    commit_file(d.path(), "b.txt", "1\n", "second");
+    let first = git(d.path(), &["rev-parse", "HEAD~1"]).trim().to_string();
+
+    std::fs::write(d.path().join("a.txt"), "1\nmore\n").unwrap();
+    git(d.path(), &["add", "a.txt"]);
+    let b = open(d.path());
+    assert_eq!(b.fixup_into(&first).unwrap(), rustle_core::OpResult::Done);
+
+    let subjects = git(d.path(), &["log", "--format=%s"]);
+    assert_eq!(subjects.lines().collect::<Vec<_>>(), ["second", "first"]);
+    let content = git(d.path(), &["show", "HEAD~1:a.txt"]);
+    assert_eq!(content, "1\nmore\n");
+}
+
+#[test]
+fn bisect_finds_the_first_bad_commit() {
+    let d = tempfile::tempdir().unwrap();
+    init(d.path());
+    commit_file(d.path(), "f.txt", "ok\n", "c1");
+    let good = git(d.path(), &["rev-parse", "HEAD"]).trim().to_string();
+    commit_file(d.path(), "f.txt", "ok\nok\n", "c2");
+    commit_file(d.path(), "f.txt", "bad\n", "c3 breaks it");
+    commit_file(d.path(), "g.txt", "x\n", "c4");
+    let bad = git(d.path(), &["rev-parse", "HEAD"]).trim().to_string();
+
+    let b = open(d.path());
+    let mut out = b.bisect_start(&bad, &good).unwrap();
+    for _ in 0..4 {
+        if out.contains("is the first bad commit") {
+            break;
+        }
+        let broken = std::fs::read_to_string(d.path().join("f.txt")).unwrap() == "bad\n";
+        out = b.bisect_mark(if broken { "bad" } else { "good" }).unwrap();
+    }
+    assert!(out.contains("c3 breaks it"), "{out}");
+    b.bisect_reset().unwrap();
+}
+
+#[test]
+fn tag_message_untrack_patch_stash_and_containing() {
+    let d = tempfile::tempdir().unwrap();
+    init(d.path());
+    commit_file(d.path(), "a.txt", "1\n", "first");
+    git(d.path(), &["tag", "-a", "v1", "-m", "release one"]);
+    let b = open(d.path());
+    assert_eq!(b.tag_message("v1").unwrap(), "release one");
+
+    // patch round trip
+    let head = git(d.path(), &["rev-parse", "HEAD"]).trim().to_string();
+    let patch = d.path().join("out.patch");
+    b.export_patch(&head, &patch).unwrap();
+    assert!(
+        std::fs::read_to_string(&patch)
+            .unwrap()
+            .contains("Subject: [PATCH] first")
+    );
+
+    // branches containing the commit
+    assert_eq!(b.containing_branches(&head).unwrap(), ["main"]);
+
+    // untrack keeps the file
+    commit_file(d.path(), "secret.env", "x\n", "oops");
+    b.untrack(&["secret.env".to_string()]).unwrap();
+    assert!(d.path().join("secret.env").exists());
+    assert!(git(d.path(), &["status", "--porcelain"]).contains("D  secret.env"));
+    git(d.path(), &["reset", "-q", "--hard"]);
+
+    // stash preview
+    std::fs::write(d.path().join("a.txt"), "1\nstashed\n").unwrap();
+    git(d.path(), &["stash", "push", "-q"]);
+    assert!(b.stash_show(0).unwrap().contains("+stashed"));
+}
+
+#[test]
+fn dashboard_reports_stale_branches_and_big_files() {
+    let d = tempfile::tempdir().unwrap();
+    init(d.path());
+    commit_file(d.path(), "small.txt", "x\n", "base");
+    std::fs::write(d.path().join("big.bin"), vec![b'a'; 5000]).unwrap();
+    git(d.path(), &["add", "big.bin"]);
+    git(d.path(), &["commit", "-q", "-m", "big"]);
+    git(d.path(), &["branch", "old"]);
+
+    let b = open(d.path());
+    // stale_days = -1 makes every branch "older" than the cutoff
+    let dash = b.dashboard(-1).unwrap();
+    assert_eq!(dash.commits, 2);
+    assert_eq!(dash.tracked_files, 2);
+    assert_eq!(dash.big_files[0].0, "big.bin");
+    assert!(dash.stale.iter().any(|s| s.name == "old" && s.merged));
+    assert!(dash.stale.iter().all(|s| s.name != "main"));
+}
+
+#[test]
+fn log_can_be_limited_by_date() {
+    let d = tempfile::tempdir().unwrap();
+    init(d.path());
+    commit_file(d.path(), "a.txt", "1\n", "now");
+    let b = open(d.path());
+    let q = LogQuery {
+        until: Some("2000-01-01".into()),
+        ..LogQuery::all(10)
+    };
+    assert!(b.log_query(&q).unwrap().is_empty());
+    let q = LogQuery {
+        since: Some("2000-01-01".into()),
+        ..LogQuery::all(10)
+    };
+    assert_eq!(b.log_query(&q).unwrap().len(), 1);
+}

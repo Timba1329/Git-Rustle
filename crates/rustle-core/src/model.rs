@@ -240,6 +240,9 @@ pub struct LogQuery {
     pub current_branch_only: bool,
     /// Only these refs (branch names); empty = no restriction.
     pub revs: Vec<String>,
+    /// `--since` / `--until` dates (anything git understands, e.g. 2026-11-01).
+    pub since: Option<String>,
+    pub until: Option<String>,
 }
 
 impl LogQuery {
@@ -252,7 +255,11 @@ impl LogQuery {
 
     /// Whether any filter narrows the log (which makes the graph meaningless).
     pub fn is_filtered(&self) -> bool {
-        self.text.is_some() || self.author.is_some() || self.path.is_some()
+        self.text.is_some()
+            || self.author.is_some()
+            || self.path.is_some()
+            || self.since.is_some()
+            || self.until.is_some()
     }
 }
 
@@ -307,4 +314,24 @@ pub struct LfsInfo {
     pub patterns: Vec<String>,
     /// Files currently stored in LFS.
     pub files: std::collections::HashSet<String>,
+}
+
+/// A branch and how long ago its tip was committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchAge {
+    pub name: String,
+    pub unix: i64,
+    pub merged: bool,
+}
+
+/// Overview numbers for the repository dashboard.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Dashboard {
+    pub commits: usize,
+    pub branches: usize,
+    pub tracked_files: usize,
+    /// Branches without recent activity, oldest first.
+    pub stale: Vec<BranchAge>,
+    /// Largest tracked files: (path, bytes).
+    pub big_files: Vec<(String, u64)>,
 }

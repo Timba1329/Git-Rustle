@@ -258,6 +258,36 @@ impl DiffView {
             .collect()
     }
 
+    /// First row of every block of added/removed lines, for "next change" navigation.
+    pub fn change_rows(&self, side_by_side: bool) -> Vec<usize> {
+        let rows = if side_by_side {
+            &self.rows_sbs
+        } else {
+            &self.rows_unified
+        };
+        let changed = |r: Row| match r {
+            Row::Line(f, h, l) => self.files[f].hunks[h].lines[l].starts_with(['+', '-']),
+            Row::Sbs(f, h, s) => {
+                let r = &self.sbs[f][h][s];
+                match (&r.left, &r.right) {
+                    (Some(a), Some(b)) => a.text != b.text,
+                    _ => true,
+                }
+            }
+            _ => false,
+        };
+        let mut out = Vec::new();
+        let mut prev = false;
+        for (i, r) in rows.iter().enumerate() {
+            let c = changed(*r);
+            if c && !prev {
+                out.push(i);
+            }
+            prev = c;
+        }
+        out
+    }
+
     /// Row of line `line` (1-based) of a plain file view.
     pub fn file_line_row(line: u32) -> usize {
         2 + line.saturating_sub(1) as usize
@@ -700,9 +730,52 @@ pub fn show(
     });
 }
 
+/// F3 / Shift+F3: the row of the next or previous change in the diff, when one of them was pressed.
+pub fn change_nav(ctx: &egui::Context, d: &DiffView, side_by_side: bool, idx: &mut usize) -> Option<usize> {
+    let rows = d.change_rows(side_by_side);
+    if rows.is_empty() {
+        return None;
+    }
+    let (prev, next) = ctx.input_mut(|i| {
+        (
+            i.consume_key(egui::Modifiers::SHIFT, egui::Key::F3),
+            i.consume_key(egui::Modifiers::NONE, egui::Key::F3),
+        )
+    });
+    if next {
+        *idx = (*idx + 1) % rows.len();
+    } else if prev {
+        *idx = (*idx + rows.len() - 1) % rows.len();
+    } else {
+        return None;
+    }
+    rows.get(*idx).copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn change_rows_marks_the_start_of_each_change_block() {
+        let text = "diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -1,6 +1,6 @@
+ a
+-b
++B
+ c
+ d
+-e
++E
+ f
+";
+        let v = DiffView::build("t".into(), text, true);
+        let rows = v.change_rows(false);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0] < rows[1]);
+    }
 
     const DIFF: &str = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n keep\n-let  x = 1;\n+let x = 1;\n tail  \n";
 

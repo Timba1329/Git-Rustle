@@ -18,6 +18,7 @@ mod tab;
 mod theme;
 mod update;
 mod watcher;
+mod windows;
 mod worker;
 
 use settings::Settings;

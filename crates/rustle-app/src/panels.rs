@@ -794,8 +794,19 @@ impl Tab {
                                         if ctx_item(ui, "Check out (detached)", true) {
                                             acts.push(Act::Send(Request::CheckoutCommit(t.clone())));
                                         }
+                                        if ctx_item(ui, "Show annotation", true) {
+                                            acts.push(Act::Send(Request::TagMessage(t.clone())));
+                                        }
                                         if ctx_item(ui, "Push tag", true) {
                                             acts.push(Act::Send(Request::PushTag(t.clone())));
+                                        }
+                                        if ctx_item(ui, "Delete on remote…", true) {
+                                            acts.push(Act::Dialog(Dialog::Confirm {
+                                                title: "Delete remote tag".into(),
+                                                text: format!("Delete the tag {t} on origin? This affects everyone."),
+                                                button: "Delete".into(),
+                                                req: Some(Request::DeleteRemoteTag(t.clone())),
+                                            }));
                                         }
                                         if ctx_item(ui, "Delete…", true) {
                                             acts.push(Act::Dialog(Dialog::Confirm {
@@ -825,6 +836,9 @@ impl Tab {
                                     );
                                     let idx = s.index;
                                     resp.context_menu(|ui| {
+                                        if ctx_item(ui, "Preview changes", true) {
+                                            acts.push(Act::Send(Request::StashShow(idx)));
+                                        }
                                         if ctx_item(ui, "Apply", true) {
                                             acts.push(Act::Send(Request::StashApply(idx)));
                                         }
@@ -1014,39 +1028,44 @@ impl Tab {
                 let compare = self.compare_id.clone();
                 let head_id = r.head_id.clone();
                 let mut last_visible = 0;
+                let mut first_visible = 0;
                 ui.spacing_mut().item_spacing.y = 0.0;
-                egui::ScrollArea::vertical().auto_shrink(false).show_rows(
-                    ui,
-                    ROW_H,
-                    r.commits.len() + off,
-                    |ui, range| {
-                        last_visible = range.end;
-                        for i in range {
-                            if off == 1 && i == 0 {
-                                wip_row(ui, r, graph_w, &graph.rows[0], acts);
-                                continue;
-                            }
-                            let ci = i - off;
-                            let c = &r.commits[ci];
-                            let state = RowState {
-                                selected: selected == Some(ci) || compare.as_deref() == Some(c.id.as_str()),
-                                in_multi: multi.contains(c.id.as_str()),
-                                mods,
-                                draggable: self.reorderable.contains(&c.id),
-                            };
-                            commit_row(
-                                ui,
-                                r,
-                                ci,
-                                &graph.rows[i],
-                                graph_w,
-                                &state,
-                                head_id.as_deref(),
-                                &self.reorderable,
-                                acts,
-                            );
+                let mut sa = egui::ScrollArea::vertical().auto_shrink(false);
+                if let Some(i) = self.scroll_to_commit.take() {
+                    sa = sa.vertical_scroll_offset(((i + off) as f32 * ROW_H - 140.0).max(0.0));
+                }
+                sa.show_rows(ui, ROW_H, r.commits.len() + off, |ui, range| {
+                    last_visible = range.end;
+                    first_visible = range.start;
+                    for i in range {
+                        if off == 1 && i == 0 {
+                            wip_row(ui, r, graph_w, &graph.rows[0], acts);
+                            continue;
                         }
-                    },
+                        let ci = i - off;
+                        let c = &r.commits[ci];
+                        let state = RowState {
+                            selected: selected == Some(ci) || compare.as_deref() == Some(c.id.as_str()),
+                            in_multi: multi.contains(c.id.as_str()),
+                            mods,
+                            draggable: self.reorderable.contains(&c.id),
+                        };
+                        commit_row(
+                            ui,
+                            r,
+                            ci,
+                            &graph.rows[i],
+                            graph_w,
+                            &state,
+                            head_id.as_deref(),
+                            &self.reorderable,
+                            acts,
+                        );
+                    }
+                });
+                self.view_range = (
+                    first_visible.saturating_sub(off),
+                    last_visible.saturating_sub(off),
                 );
                 if r.has_more && !self.load_more_sent && last_visible + 40 >= r.commits.len() + off {
                     self.load_more_sent = true;
@@ -1083,6 +1102,34 @@ impl Tab {
                             .margin(Margin::symmetric(6, 3)),
                     );
                     apply |= enter(&ae, ui);
+                    let authors: Vec<String> = self.repo.as_ref().map_or_else(Vec::new, |r| {
+                        let mut v: Vec<String> = r.commits.iter().map(|c| c.author_name.clone()).collect();
+                        v.sort();
+                        v.dedup();
+                        v.truncate(40);
+                        v
+                    });
+                    ui.menu_button("▾", |ui| {
+                        for a in &authors {
+                            if ui.button(a).clicked() {
+                                self.author.clone_from(a);
+                                apply = true;
+                                ui.close();
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Pick an author");
+                    for (value, hint) in [(&mut self.since, "From (2026-11-01)"), (&mut self.until, "Until")]
+                    {
+                        let r = ui.add(
+                            egui::TextEdit::singleline(value)
+                                .hint_text(hint)
+                                .desired_width(104.0)
+                                .margin(Margin::symmetric(6, 3)),
+                        );
+                        apply |= enter(&r, ui);
+                    }
                     if ui
                         .checkbox(&mut self.branch_only, "Current branch only")
                         .changed()
@@ -1091,6 +1138,13 @@ impl Tab {
                     }
                     if let Some(p) = self.path_filter.clone() {
                         ui.label(RichText::new(format!("History of {p}")).color(accent()));
+                    }
+                    if ui
+                        .add(small("HEAD"))
+                        .on_hover_text("Go to the checked-out commit")
+                        .clicked()
+                    {
+                        acts.push(Act::GoToHead);
                     }
                     if !self.graph_refs.is_empty()
                         && ui
@@ -1103,6 +1157,9 @@ impl Tab {
                     let filtered = self.repo.as_ref().is_some_and(|r| r.query.is_filtered())
                         || self.path_filter.is_some()
                         || self.branch_only
+                        || !self.since.is_empty()
+                        || !self.until.is_empty()
+                        || !self.graph_refs.is_empty()
                         || !self.search.is_empty()
                         || !self.author.is_empty();
                     if filtered && ui.add(small("Clear")).clicked() {
@@ -1228,6 +1285,39 @@ impl Tab {
                         .as_ref()
                         .map(|a| format!("  ·  compared with {}", &a[..a.len().min(7)]))
                         .unwrap_or_default();
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Parents:").size(12.0).color(text_weak()));
+                        for p in &c.parents {
+                            let short: String = p.chars().take(7).collect();
+                            if ui
+                                .add(
+                                    egui::Label::new(
+                                        RichText::new(short).monospace().size(12.0).color(accent()),
+                                    )
+                                    .sense(Sense::click()),
+                                )
+                                .on_hover_text("Go to this commit")
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .clicked()
+                            {
+                                acts.push(Act::GoToId(p.clone()));
+                            }
+                        }
+                        if let Some((cid, branches)) = &self.containing
+                            && cid == &c.id
+                            && !branches.is_empty()
+                        {
+                            ui.label(RichText::new("  ·  In:").size(12.0).color(text_weak()));
+                            let shown: Vec<&str> = branches.iter().take(4).map(String::as_str).collect();
+                            let more = branches.len().saturating_sub(4);
+                            let mut t = shown.join(", ");
+                            if more > 0 {
+                                t.push_str(&format!(" +{more}"));
+                            }
+                            ui.label(RichText::new(t).size(12.0).color(purple()))
+                                .on_hover_text(branches.join("\n"));
+                        }
+                    });
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!(
@@ -1406,10 +1496,16 @@ impl Tab {
                                     d,
                                     settings.side_by_side,
                                 );
+                                let change_scroll = diffview::change_nav(
+                                    ui.ctx(),
+                                    d,
+                                    settings.side_by_side,
+                                    &mut self.change_idx,
+                                );
                                 let extras = ViewExtras {
                                     find: needle.as_deref(),
                                     current_row: current,
-                                    scroll_to: scroll,
+                                    scroll_to: scroll.or(change_scroll),
                                     show_ws: settings.show_whitespace,
                                 };
                                 let mut none = Vec::<DiffAction>::new();
@@ -1790,6 +1886,7 @@ fn commit_row(
         });
     }
     let on_head_line = head_id.is_some();
+    let has_staged = r.status.files.iter().any(|f| f.is_staged());
     let id = c.id.clone();
     resp.context_menu(|ui| {
         if ctx_item(ui, "Check out this commit", true) {
@@ -1804,6 +1901,35 @@ fn commit_row(
                 check: Some(("Switch to the new branch".into(), true)),
             }));
         }
+        if ctx_item(ui, "Fold staged changes into this commit (fixup)…", has_staged) {
+            acts.push(Act::Dialog(Dialog::Confirm {
+                title: "Fixup".into(),
+                text: "Commit the staged changes as a fixup of this commit and fold them into it. \
+                       This rewrites history from this commit on."
+                    .into(),
+                button: "Fixup".into(),
+                req: Some(Request::Fixup(id.clone())),
+            }));
+        }
+        if ctx_item(ui, "Export as patch…", true) {
+            let name = format!("{}.patch", &id[..id.len().min(8)]);
+            if let Some(path) = rfd::FileDialog::new().set_file_name(name).save_file() {
+                acts.push(Act::Send(Request::ExportPatch { id: id.clone(), path }));
+            }
+        }
+        if ctx_item(ui, "Bisect: this commit is bad", true) {
+            acts.push(Act::BisectPick {
+                id: id.clone(),
+                bad: true,
+            });
+        }
+        if ctx_item(ui, "Bisect: this commit is good", true) {
+            acts.push(Act::BisectPick {
+                id: id.clone(),
+                bad: false,
+            });
+        }
+        ui.separator();
         if ctx_item(ui, "Create tag here…", true) {
             acts.push(Act::Dialog(Dialog::Tag {
                 target: id.clone(),

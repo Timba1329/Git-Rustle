@@ -571,6 +571,13 @@ impl Tab {
                                     if ui.selectable_label(selected, &f.path).clicked() {
                                         acts.push(Act::SelectFile((*f).clone(), false));
                                     }
+                                    if ui
+                                        .add_enabled(!busy, small("External tool"))
+                                        .on_hover_text("Open the configured git merge tool (merge.tool)")
+                                        .clicked()
+                                    {
+                                        acts.push(Act::Send(Request::Mergetool(f.path.clone())));
+                                    }
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                         if ui.add_enabled(!busy, small("Resolved")).clicked() {
                                             acts.push(Act::Send(Request::Stage(vec![f.path.clone()])));
@@ -923,10 +930,11 @@ impl Tab {
         });
         let (needle, current, scroll) =
             find_bar(ui, &mut self.find, &mut self.find_pos, d, settings.side_by_side);
+        let change_scroll = diffview::change_nav(ui.ctx(), d, settings.side_by_side, &mut self.change_idx);
         let extras = ViewExtras {
             find: needle.as_deref(),
             current_row: current,
-            scroll_to: scroll,
+            scroll_to: scroll.or(change_scroll),
             show_ws: settings.show_whitespace,
         };
         let mut da = Vec::<DiffAction>::new();
@@ -970,6 +978,18 @@ fn row_menu(
             acts.push(Act::Send(Request::StashFiles {
                 paths: f.paths(),
                 message: String::new(),
+            }));
+        }
+        if !f.is_untracked() && ui.button("Stop tracking (keep the file)…").clicked() {
+            ui.close();
+            acts.push(Act::Dialog(Dialog::Confirm {
+                title: "Stop tracking".into(),
+                text: format!(
+                    "Remove {} from git but keep it on disk? Add it to .gitignore afterwards to keep it out.",
+                    f.path
+                ),
+                button: "Stop tracking".into(),
+                req: Some(Request::Untrack(f.paths())),
             }));
         }
         if ui.button(label).clicked() {

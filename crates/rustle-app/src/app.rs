@@ -540,6 +540,20 @@ impl App {
                 }
             }
             Command::OpenRecent(p) => app_acts.push(AppAct::OpenPath(p)),
+            Command::FetchAll => {
+                for t in &mut self.tabs {
+                    if t.repo.is_some() {
+                        t.send(Request::Fetch);
+                    }
+                }
+            }
+            Command::PullAll => {
+                for t in &mut self.tabs {
+                    if t.repo.is_some() {
+                        t.send(Request::Pull);
+                    }
+                }
+            }
             other => {
                 let tab = &mut self.tabs[self.active];
                 let path = tab.repo.as_ref().map(|r| r.path.clone());
@@ -573,6 +587,16 @@ impl App {
                     })),
                     Command::SearchCommits => tab.focus_search = true,
                     Command::Reflog => tab_acts.push(Act::ShowReflog),
+                    Command::Dashboard => tab_acts.push(Act::Send(Request::Dashboard)),
+                    Command::Hooks => tab.hooks_open = true,
+                    Command::ApplyPatch => {
+                        if let Some(p) = rfd::FileDialog::new()
+                            .add_filter("Patch", &["patch", "diff"])
+                            .pick_file()
+                        {
+                            tab_acts.push(Act::Send(Request::ApplyPatchFile(p)));
+                        }
+                    }
                     Command::RepoSettings => tab_acts.push(Act::OpenRepoSettings),
                     Command::UpdateSubmodules => tab_acts.push(Act::Send(Request::SubmoduleSync {
                         path: None,
@@ -890,6 +914,12 @@ impl App {
                         if item(ui, "Refresh", "F5", has_repo) {
                             chosen = Some(Refresh);
                         }
+                        if item(ui, "Fetch all open repositories", "", true) {
+                            chosen = Some(FetchAll);
+                        }
+                        if item(ui, "Pull all open repositories", "", true) {
+                            chosen = Some(PullAll);
+                        }
                         ui.separator();
                         if item(ui, "Commit changes…", "", has_repo) {
                             chosen = Some(Commit);
@@ -910,6 +940,12 @@ impl App {
                         ui.separator();
                         if item(ui, "Add worktree…", "", has_repo) {
                             chosen = Some(AddWorktree);
+                        }
+                        if item(ui, "Apply a patch file…", "", has_repo) {
+                            chosen = Some(ApplyPatch);
+                        }
+                        if item(ui, "Git hooks…", "", has_repo) {
+                            chosen = Some(Hooks);
                         }
                         if item(ui, "Update all submodules", "", has_repo) {
                             chosen = Some(UpdateSubmodules);
@@ -945,6 +981,9 @@ impl App {
                         }
                         if item(ui, "Reflog", "", has_repo) {
                             chosen = Some(Reflog);
+                        }
+                        if item(ui, "Repository dashboard", "", has_repo) {
+                            chosen = Some(Dashboard);
                         }
                         ui.separator();
                         if item(ui, "Side-by-side diffs", "", true) {
@@ -1002,11 +1041,22 @@ impl App {
                     for i in 0..self.tabs.len() {
                         let t = &self.tabs[i];
                         let selected = i == self.active;
-                        let label = if t.busy() {
+                        let mut label = if t.busy() {
                             format!("{} …", t.title)
                         } else {
                             t.title.clone()
                         };
+                        if let Some(r) = &t.repo {
+                            if !r.status.files.is_empty() {
+                                label.push_str(" ●");
+                            }
+                            if r.status.ahead > 0 {
+                                label.push_str(&format!(" ↑{}", r.status.ahead));
+                            }
+                            if r.status.behind > 0 {
+                                label.push_str(&format!(" ↓{}", r.status.behind));
+                            }
+                        }
                         let color = if selected { text() } else { text_weak() };
                         let galley = ui
                             .painter()
@@ -1504,6 +1554,8 @@ impl eframe::App for App {
             tab.graph_panel(ui, &mut acts);
             if tab.commit_open {
                 tab.commit_popup(&ctx, &mut acts, &mut self.settings);
+                tab.extra_windows(&ctx, &mut acts);
+                tab.commit_keys(&ctx);
             }
             tab.dialogs(&ctx, &mut acts);
             tab.info_windows(&ctx, &mut acts);

@@ -1,0 +1,318 @@
+//! Extra windows: branch comparison, repository dashboard, hooks, bisect, stash preview and toasts.
+
+use crate::diffview::{self, DiffAction, DiffView, ViewExtras};
+use crate::fmt;
+use crate::panels::status_color;
+use crate::tab::{Act, AppAct, Tab};
+use crate::theme::{accent, amber, bold, green, red, text_weak};
+use crate::worker::Request;
+use eframe::egui::{self, Align2, RichText, Ui, vec2};
+use rustle_core::{Commit, CommitFile};
+use std::collections::HashSet;
+use std::time::Duration;
+
+pub struct CompareView {
+    pub a: String,
+    pub b: String,
+    pub only_a: Vec<Commit>,
+    pub only_b: Vec<Commit>,
+    pub files: Vec<CommitFile>,
+}
+
+pub type StashView = (usize, DiffView, HashSet<(usize, usize, usize)>);
+
+fn size_text(bytes: u64) -> String {
+    if bytes >= 1 << 20 {
+        format!("{:.1} MB", bytes as f64 / f64::from(1 << 20))
+    } else {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    }
+}
+
+fn commit_list(ui: &mut Ui, title: &str, list: &[Commit]) {
+    ui.label(bold(
+        format!(
+            "{title}  ({}{})",
+            list.len(),
+            if list.len() >= 300 { "+" } else { "" }
+        ),
+        13.0,
+    ));
+    egui::ScrollArea::vertical()
+        .id_salt(title)
+        .max_height(220.0)
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            if list.is_empty() {
+                ui.label(RichText::new("Nothing").color(text_weak()));
+            }
+            for c in list {
+                let short: String = c.id.chars().take(7).collect();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(short).monospace().size(12.0).color(accent()));
+                    ui.label(RichText::new(&c.subject).size(12.5));
+                })
+                .response
+                .on_hover_text(format!("{} · {}", c.author_name, fmt::date(c.time, true)));
+            }
+        });
+}
+
+impl Tab {
+    pub fn extra_windows(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+        self.compare_window(ctx);
+        self.dashboard_window(ctx, acts);
+        self.hooks_window(ctx, acts);
+        self.bisect_window(ctx, acts);
+        self.stash_window(ctx, acts);
+        self.toast_ui(ctx);
+    }
+
+    fn compare_window(&mut self, ctx: &egui::Context) {
+        let Some(v) = &self.compare_view else { return };
+        let mut open = true;
+        egui::Window::new(bold(format!("Compare {} ↔ {}", v.a, v.b), 14.0))
+            .open(&mut open)
+            .default_size([900.0, 560.0])
+            .show(ctx, |ui| {
+                ui.columns(2, |c| {
+                    commit_list(&mut c[0], &format!("Only in {}", v.a), &v.only_a);
+                    commit_list(&mut c[1], &format!("Only in {}", v.b), &v.only_b);
+                });
+                ui.separator();
+                ui.label(bold(
+                    format!("Changed files from {} to {}  ({})", v.a, v.b, v.files.len()),
+                    13.0,
+                ));
+                egui::ScrollArea::vertical()
+                    .id_salt("cmpfiles")
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        for f in &v.files {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(f.status).monospace().color(status_color(f.status)));
+                                ui.label(&f.path);
+                                if let (Some(a), Some(d)) = (f.added, f.deleted) {
+                                    ui.label(RichText::new(format!("+{a}")).color(green()).size(12.0));
+                                    ui.label(RichText::new(format!("−{d}")).color(red()).size(12.0));
+                                }
+                            });
+                        }
+                    });
+            });
+        if !open {
+            self.compare_view = None;
+        }
+    }
+
+    fn dashboard_window(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+        let Some(d) = &self.dashboard else { return };
+        let mut open = true;
+        egui::Window::new(bold("Repository dashboard", 14.0))
+            .open(&mut open)
+            .default_size([620.0, 560.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    for (n, label) in [
+                        (d.commits, "commits"),
+                        (d.branches, "branches"),
+                        (d.tracked_files, "tracked files"),
+                    ] {
+                        ui.label(bold(n.to_string(), 18.0));
+                        ui.label(RichText::new(label).color(text_weak()));
+                        ui.add_space(14.0);
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(bold(
+                        format!("Branches without activity for 30+ days  ({})", d.stale.len()),
+                        13.0,
+                    ));
+                    if ui
+                        .small_button("Delete merged branches…")
+                        .on_hover_text("Review and delete branches that are fully merged")
+                        .clicked()
+                    {
+                        acts.push(Act::Send(Request::MergedBranches { remote: false }));
+                    }
+                });
+                egui::ScrollArea::vertical()
+                    .id_salt("stale")
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        if d.stale.is_empty() {
+                            ui.label(RichText::new("None").color(text_weak()));
+                        }
+                        for b in &d.stale {
+                            ui.horizontal(|ui| {
+                                ui.label(&b.name);
+                                ui.label(RichText::new(fmt::relative(b.unix)).size(12.0).color(text_weak()));
+                                if b.merged {
+                                    ui.label(RichText::new("merged").size(11.5).color(green()));
+                                } else {
+                                    ui.label(RichText::new("not merged").size(11.5).color(amber()));
+                                }
+                            });
+                        }
+                    });
+                ui.separator();
+                ui.label(bold("Largest files", 13.0));
+                for (path, size) in &d.big_files {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(size_text(*size))
+                                .monospace()
+                                .size(12.0)
+                                .color(accent()),
+                        );
+                        ui.label(path);
+                    });
+                }
+            });
+        if !open {
+            self.dashboard = None;
+        }
+    }
+
+    fn hooks_window(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+        if !self.hooks_open {
+            return;
+        }
+        let Some(dir) = self.repo.as_ref().map(|r| r.git_dir.join("hooks")) else {
+            self.hooks_open = false;
+            return;
+        };
+        let mut hooks: Vec<String> = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.filter_map(Result::ok)
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| !n.ends_with(".sample"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        hooks.sort();
+        let mut open = true;
+        let mut rename: Option<(String, String)> = None;
+        egui::Window::new(bold("Git hooks", 14.0))
+            .open(&mut open)
+            .default_size([460.0, 320.0])
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new("Disabling renames a hook to <name>.disabled. Hooks from core.hooksPath are not listed.")
+                        .size(12.0)
+                        .color(text_weak()),
+                );
+                ui.add_space(4.0);
+                if hooks.is_empty() {
+                    ui.label("No hooks installed.");
+                }
+                for h in &hooks {
+                    ui.horizontal(|ui| {
+                        if let Some(base) = h.strip_suffix(".disabled") {
+                            ui.label(RichText::new(format!("{base}  (disabled)")).color(text_weak()));
+                            if ui.small_button("Enable").clicked() {
+                                rename = Some((h.clone(), base.to_string()));
+                            }
+                        } else {
+                            ui.label(RichText::new(h).color(green()));
+                            if ui.small_button("Disable").clicked() {
+                                rename = Some((h.clone(), format!("{h}.disabled")));
+                            }
+                        }
+                    });
+                }
+                ui.add_space(6.0);
+                if ui.small_button("Open hooks folder").clicked() {
+                    acts.push(Act::App(AppAct::Explorer(dir.clone())));
+                }
+            });
+        if let Some((from, to)) = rename {
+            let _ = std::fs::rename(dir.join(from), dir.join(to));
+        }
+        if !open {
+            self.hooks_open = false;
+        }
+    }
+
+    fn bisect_window(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+        let Some((text, active)) = self.bisect.clone() else {
+            return;
+        };
+        let busy = self.busy();
+        egui::Window::new(bold("Bisect", 14.0))
+            .anchor(Align2::RIGHT_TOP, vec2(-16.0, 70.0))
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.set_max_width(380.0);
+                let shown: String = text.lines().take(4).collect::<Vec<_>>().join("\n");
+                ui.label(RichText::new(shown).monospace().size(12.0));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if active {
+                        for (label, mark) in [("Good", "good"), ("Bad", "bad"), ("Skip", "skip")] {
+                            if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
+                                acts.push(Act::Send(Request::BisectMark(mark.into())));
+                            }
+                        }
+                    }
+                    if ui.add_enabled(!busy, egui::Button::new("Finish")).clicked() {
+                        acts.push(Act::Send(Request::BisectReset));
+                    }
+                });
+            });
+    }
+
+    fn stash_window(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+        let side = self.stash_side_by_side;
+        let Some((index, view, sel)) = &mut self.stash_view else {
+            return;
+        };
+        let index = *index;
+        let mut open = true;
+        egui::Window::new(bold(format!("Stash preview — stash@{{{index}}}"), 14.0))
+            .open(&mut open)
+            .default_size([860.0, 560.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        acts.push(Act::Send(Request::StashApply(index)));
+                    }
+                    if ui.button("Pop").clicked() {
+                        acts.push(Act::Send(Request::StashPop(index)));
+                    }
+                });
+                ui.separator();
+                let extras = ViewExtras {
+                    find: None,
+                    current_row: None,
+                    scroll_to: None,
+                    show_ws: false,
+                };
+                let mut none = Vec::<DiffAction>::new();
+                diffview::show(ui, "stash-diff", view, side, sel, None, &extras, &mut none);
+            });
+        if !open {
+            self.stash_view = None;
+        }
+    }
+
+    fn toast_ui(&mut self, ctx: &egui::Context) {
+        let Some((text, at)) = &self.toast else { return };
+        if at.elapsed() > Duration::from_secs(4) {
+            self.toast = None;
+            return;
+        }
+        let first: String = text.lines().next().unwrap_or("").chars().take(140).collect();
+        egui::Area::new(egui::Id::unique("toast"))
+            .anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -16.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(first);
+                });
+            });
+        ctx.request_repaint_after(Duration::from_millis(500));
+    }
+}
