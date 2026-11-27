@@ -61,7 +61,8 @@ fn item(ui: &mut Ui, label: &str) -> bool {
 
 pub fn ctx_item(ui: &mut Ui, label: &str, enabled: bool) -> bool {
     let clicked = ui
-        .add_enabled(enabled, egui::Button::new(label).frame(false))
+        .add_enabled(enabled, egui::Button::new(label))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked();
     if clicked {
         ui.close();

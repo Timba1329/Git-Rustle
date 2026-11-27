@@ -259,8 +259,8 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode, scale: f32) {
     v.widgets.inactive.weak_bg_fill = bg_btn();
     v.widgets.inactive.bg_stroke = Stroke::new(1.0, border());
     v.widgets.inactive.fg_stroke = Stroke::new(1.0, text());
-    v.widgets.hovered.bg_fill = bg_btn_hover();
-    v.widgets.hovered.weak_bg_fill = bg_btn_hover();
+    v.widgets.hovered.bg_fill = accent().gamma_multiply(0.30);
+    v.widgets.hovered.weak_bg_fill = accent().gamma_multiply(0.24);
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, text_weak().gamma_multiply(0.7));
     v.widgets.hovered.fg_stroke = Stroke::new(1.0, text());
     v.widgets.active.bg_fill = accent().gamma_multiply(0.55);

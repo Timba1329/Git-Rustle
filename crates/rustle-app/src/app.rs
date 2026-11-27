@@ -1040,8 +1040,11 @@ impl App {
             bottom: 2,
         });
         let item = |ui: &mut Ui, label: &str, hint: &str, enabled: bool| -> bool {
-            let b = egui::Button::new(label).shortcut_text(hint).frame(false);
-            let clicked = ui.add_enabled(enabled, b).clicked();
+            let b = egui::Button::new(label).shortcut_text(hint);
+            let clicked = ui
+                .add_enabled(enabled, b)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked();
             if clicked {
                 ui.close();
             }
