@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1
+
+- Commit details: file filter, expand/collapse all folders, folder tree layout fix.
+- Commit window: folder tree, status icons instead of letters, "Stash all" and "Stash this file",
+  Space to stage/unstage and jump to the next file, arrow keys to move through files, the top
+  unstaged file is shown after staging.
+- Branches: search box, expand/collapse all folders, create a branch inside a folder from the
+  right-click menu.
+- Graph: narrower lanes that close gaps, smooth curves, stable color per branch name, the
+  checked-out commit is highlighted.
+
 ## 0.3.0
 
 - Commit details: all changed files in a folder tree, an "All files" diff, and added/removed line counts
