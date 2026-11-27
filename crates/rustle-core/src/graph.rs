@@ -1,7 +1,7 @@
 //! Lane algorithm for the commit graph. Expects commits in topological order
 //! (children before parents, like `git log --topo-order`).
 
-use crate::model::Commit;
+use crate::model::{Commit, RefKind};
 
 /// A line segment within one row. `from` and `to` are lane indices; in the top half it runs
 /// from the top edge (x = from) to the middle (x = to), in the bottom half from the
@@ -27,6 +27,54 @@ pub struct Graph {
     pub rows: Vec<GraphRow>,
     /// Maximum number of lanes side by side.
     pub width: usize,
+}
+
+/// Number of lane colors the UI can draw.
+pub const PALETTE: usize = 12;
+
+fn fnv(s: &str) -> u32 {
+    let mut h = 0x811c_9dc5_u32;
+    for b in s.bytes() {
+        h ^= u32::from(b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+/// Stable color index for a branch name: the same branch always gets the same color.
+fn name_color(name: &str) -> usize {
+    let n = name.strip_prefix("origin/").unwrap_or(name);
+    match n {
+        "main" | "master" => 0,
+        "develop" | "dev" => 1,
+        "test" => 2,
+        _ => 3 + fnv(n) as usize % (PALETTE - 3),
+    }
+}
+
+fn tip_color(c: &Commit) -> Option<usize> {
+    let r = c
+        .refs
+        .iter()
+        .find(|r| r.kind == RefKind::Local)
+        .or_else(|| c.refs.iter().find(|r| r.kind == RefKind::Remote))?;
+    let name = if r.kind == RefKind::Remote {
+        r.name.split_once('/').map_or(r.name.as_str(), |(_, n)| n)
+    } else {
+        r.name.as_str()
+    };
+    Some(name_color(name))
+}
+
+/// Color of the branch that a "Merge branch 'x' into y" commit brings in.
+fn merged_color(c: &Commit) -> Option<usize> {
+    let s = &c.subject;
+    if !s.starts_with("Merge ") {
+        return None;
+    }
+    let start = s.find('\'')? + 1;
+    let end = start + s[start..].find('\'')?;
+    Some(name_color(&s[start..end]))
 }
 
 type Lanes = Vec<Option<(String, usize)>>;
@@ -75,8 +123,11 @@ pub fn build_graph(commits: &[Commit]) -> Graph {
             (m, lanes[m].as_ref().map_or(0, |l| l.1))
         } else {
             let i = alloc(&mut lanes);
-            next_color += 1;
-            (i, next_color - 1)
+            let cl = tip_color(c).unwrap_or_else(|| {
+                next_color += 1;
+                next_color - 1
+            });
+            (i, cl)
         };
 
         let mut row = GraphRow {
@@ -124,8 +175,11 @@ pub fn build_graph(commits: &[Commit]) -> Graph {
                     (col, color)
                 } else {
                     let j = alloc_near(&mut lanes, col);
-                    next_color += 1;
-                    (j, next_color - 1)
+                    let cl = merged_color(c).unwrap_or_else(|| {
+                        next_color += 1;
+                        next_color - 1
+                    });
+                    (j, cl)
                 };
                 lanes[j] = Some((p.clone(), cl));
                 row.bottom.push(Seg {
@@ -178,6 +232,13 @@ mod tests {
             subject: String::new(),
             refs: vec![],
         }
+    }
+
+    #[test]
+    fn branch_colors_are_stable() {
+        assert_eq!(name_color("origin/feature/x"), name_color("feature/x"));
+        assert_eq!(name_color("main"), 0);
+        assert!(name_color("feature/y") < PALETTE);
     }
 
     #[test]

@@ -34,6 +34,19 @@ pub fn branch_rank(name: &str, pins: &[String]) -> (u8, usize) {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct TreeOpen {
+    pub base: bool,
+    pub epoch: u32,
+    pub all: Option<bool>,
+}
+
+impl TreeOpen {
+    pub fn open(self, depth: usize) -> bool {
+        self.all.unwrap_or(self.base || depth == 0)
+    }
+}
+
 #[derive(Default)]
 pub struct BTree<'a> {
     dirs: BTreeMap<String, BTree<'a>>,
@@ -60,7 +73,7 @@ pub fn btree_ui(
     ui: &mut Ui,
     node: &BTree<'_>,
     prefix: &str,
-    open: bool,
+    open: TreeOpen,
     depth: usize,
     row: &mut dyn FnMut(&mut Ui, &Branch, &str),
     mut dir_req: Option<&mut Option<String>>,
@@ -68,8 +81,8 @@ pub fn btree_ui(
     for (name, child) in &node.dirs {
         let id = format!("{prefix}{name}/");
         let r = egui::CollapsingHeader::new(RichText::new(name).size(13.0))
-            .id_salt(&id)
-            .default_open(open || depth == 0)
+            .id_salt((&id, open.epoch))
+            .default_open(open.open(depth))
             .show(ui, |ui| {
                 btree_ui(ui, child, &id, open, depth + 1, row, dir_req.as_deref_mut());
             });

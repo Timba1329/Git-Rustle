@@ -1,6 +1,6 @@
 //! Drawing of the main panels of a tab: header, sidebar, commit graph and commit details.
 
-use crate::branches::{btree_ui, build_btree, local_branch_row, remote_branch_row};
+use crate::branches::{TreeOpen, btree_ui, build_btree, local_branch_row, remote_branch_row};
 use crate::diffview::{self, DiffAction, DiffView, ViewExtras};
 use crate::fmt;
 use crate::imagediff;
@@ -24,7 +24,7 @@ const LANE_W: f32 = 12.0;
 const ROW_H: f32 = 26.0;
 
 fn lane_color(i: usize) -> Color32 {
-    const P: [Color32; 8] = [
+    const P: [Color32; 12] = [
         Color32::from_rgb(0x5b, 0x8d, 0xef),
         Color32::from_rgb(0xe5, 0x67, 0x6b),
         Color32::from_rgb(0x4f, 0xb8, 0x83),
@@ -33,6 +33,10 @@ fn lane_color(i: usize) -> Color32 {
         Color32::from_rgb(0x4d, 0xbf, 0xd0),
         Color32::from_rgb(0xe5, 0x6a, 0x9a),
         Color32::from_rgb(0xa8, 0x93, 0x86),
+        Color32::from_rgb(0xc7, 0x7d, 0xdb),
+        Color32::from_rgb(0x8f, 0xc2, 0x3f),
+        Color32::from_rgb(0xf0, 0x8a, 0x5f),
+        Color32::from_rgb(0x6f, 0x9e, 0xb8),
     ];
     P[i % P.len()]
 }
@@ -652,6 +656,14 @@ impl Tab {
                     ui.horizontal(|ui| {
                         ui.label(heading("BRANCHES".into()));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if icon_button(ui, "▸", "Collapse all folders", true).clicked() {
+                                self.branch_epoch += 1;
+                                self.branch_all = Some(false);
+                            }
+                            if icon_button(ui, "▾", "Expand all folders", true).clicked() {
+                                self.branch_epoch += 1;
+                                self.branch_all = Some(true);
+                            }
                             if icon_button(ui, "+", "New branch", !busy).clicked() {
                                 acts.push(Act::Dialog(Dialog::Input {
                                     title: "New branch".into(),
@@ -663,7 +675,27 @@ impl Tab {
                             }
                         });
                     });
-                    let locals: Vec<&Branch> = r.branches.iter().filter(|b| !b.is_remote).collect();
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.branch_filter)
+                            .hint_text("Search branches…")
+                            .desired_width(f32::INFINITY)
+                            .margin(Margin::symmetric(6, 3)),
+                    );
+                    let q = self.branch_filter.trim().to_lowercase();
+                    let filtering = !q.is_empty();
+                    let topen = TreeOpen {
+                        base: true,
+                        epoch: self.branch_epoch + if filtering { 1_000_000 } else { 0 },
+                        all: if filtering { Some(true) } else { self.branch_all },
+                    };
+                    let ropen = TreeOpen { base: false, ..topen };
+                    let matches = |b: &&Branch| q.is_empty() || b.name.to_lowercase().contains(&q);
+                    let locals: Vec<&Branch> = r
+                        .branches
+                        .iter()
+                        .filter(|b| !b.is_remote)
+                        .filter(matches)
+                        .collect();
                     let pinned_list: Vec<&Branch> = pins
                         .iter()
                         .filter_map(|n| locals.iter().copied().find(|b| &b.name == n))
@@ -694,7 +726,7 @@ impl Tab {
                         ui,
                         &tree,
                         "l:",
-                        true,
+                        topen,
                         0,
                         &mut |ui, b, label| {
                             local_branch_row(ui, b, label, busy, &current, false, acts);
@@ -711,7 +743,12 @@ impl Tab {
                         }));
                     }
 
-                    let remotes: Vec<&Branch> = r.branches.iter().filter(|b| b.is_remote).collect();
+                    let remotes: Vec<&Branch> = r
+                        .branches
+                        .iter()
+                        .filter(|b| b.is_remote)
+                        .filter(matches)
+                        .collect();
                     if !remotes.is_empty() {
                         ui.add_space(8.0);
                         egui::CollapsingHeader::new(heading(format!("REMOTES  {}", remotes.len())))
@@ -722,7 +759,7 @@ impl Tab {
                                     ui,
                                     &tree,
                                     "r:",
-                                    false,
+                                    ropen,
                                     0,
                                     &mut |ui, b, label| {
                                         remote_branch_row(ui, b, label, busy, &current, acts);
@@ -1253,6 +1290,22 @@ impl Tab {
                         Layout::top_down(Align::Min),
                         |ui| {
                             ui.set_width(files_w);
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.cfile_filter)
+                                        .hint_text("Filter files…")
+                                        .desired_width(files_w - 64.0)
+                                        .margin(Margin::symmetric(6, 3)),
+                                );
+                                if icon_button(ui, "▾", "Expand all folders", true).clicked() {
+                                    self.cdir_epoch += 1;
+                                    self.cdir_all = Some(true);
+                                }
+                                if icon_button(ui, "▸", "Collapse all folders", true).clicked() {
+                                    self.cdir_epoch += 1;
+                                    self.cdir_all = Some(false);
+                                }
+                            });
                             egui::ScrollArea::vertical()
                                 .id_salt("cfiles")
                                 .auto_shrink(false)
@@ -1262,15 +1315,25 @@ impl Tab {
                                     let total_d: u32 =
                                         self.commit_files.iter().filter_map(|f| f.deleted).sum();
                                     let all_sel = self.selected_cfile.as_deref() == Some("");
-                                    let r = all_rows(ui, self.commit_files.len(), total_a, total_d, all_sel);
+                                    let q = self.cfile_filter.trim().to_lowercase();
+                                    let shown: Vec<&CommitFile> = self
+                                        .commit_files
+                                        .iter()
+                                        .filter(|f| q.is_empty() || f.path.to_lowercase().contains(&q))
+                                        .collect();
+                                    let r = all_rows(ui, shown.len(), total_a, total_d, all_sel);
                                     if r.clicked() {
                                         acts.push(Act::SelectCommitFile(String::new()));
                                     }
-                                    let paths: Vec<String> =
-                                        self.commit_files.iter().map(|f| f.path.clone()).collect();
+                                    let paths: Vec<String> = shown.iter().map(|f| f.path.clone()).collect();
                                     let tree = crate::tab::FileTree::build(&paths);
                                     let by_path: std::collections::HashMap<&str, &CommitFile> =
-                                        self.commit_files.iter().map(|f| (f.path.as_str(), f)).collect();
+                                        shown.iter().map(|f| (f.path.as_str(), *f)).collect();
+                                    let open = TreeOpen {
+                                        base: true,
+                                        epoch: self.cdir_epoch + if q.is_empty() { 0 } else { 1_000_000 },
+                                        all: if q.is_empty() { self.cdir_all } else { Some(true) },
+                                    };
                                     let rev = self.selected_id.clone();
                                     commit_tree_ui(
                                         ui,
@@ -1280,6 +1343,7 @@ impl Tab {
                                         self.selected_cfile.as_deref(),
                                         &rev,
                                         acts,
+                                        open,
                                     );
                                 });
                         },
@@ -1392,6 +1456,7 @@ fn paint_counts(p: &egui::Painter, rect: egui::Rect, a: Option<u32>, d: Option<u
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn commit_tree_ui(
     ui: &mut Ui,
     node: &crate::tab::FileTree,
@@ -1400,6 +1465,7 @@ fn commit_tree_ui(
     selected: Option<&str>,
     rev: &Option<String>,
     acts: &mut Vec<Act>,
+    open: TreeOpen,
 ) {
     for (name, child) in &node.dirs {
         let path = format!("{prefix}{name}");
@@ -1411,10 +1477,10 @@ fn commit_tree_ui(
             c = ch;
         }
         egui::CollapsingHeader::new(RichText::new(label).size(13.0))
-            .id_salt(("cdir", &cur))
-            .default_open(true)
+            .id_salt(("cdir", &cur, open.epoch))
+            .default_open(open.open(1))
             .show(ui, |ui| {
-                commit_tree_ui(ui, c, &format!("{cur}/"), by_path, selected, rev, acts);
+                commit_tree_ui(ui, c, &format!("{cur}/"), by_path, selected, rev, acts, open);
             });
     }
     for (name, full) in &node.files {

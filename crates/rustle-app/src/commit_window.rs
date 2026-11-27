@@ -6,7 +6,7 @@ use crate::diffview::{self, DiffAction, StageCtx, ViewExtras};
 use crate::imagediff;
 use crate::panels::{find_bar, status_icon};
 use crate::settings::Settings;
-use crate::tab::{Act, AppAct, ConflictEditor, Dialog, Tab};
+use crate::tab::{Act, AppAct, ConflictEditor, Dialog, InputKind, Tab};
 use crate::theme;
 use crate::theme::{
     accent, amber, bg_btn, bg_btn_hover, bg_input, bold, border, green, primary_button, purple, red, text,
@@ -63,6 +63,16 @@ fn change_tree_ui(
             row(ui, f);
         }
     }
+}
+
+fn display_order<'a>(list: &[&'a FileChange]) -> Vec<&'a FileChange> {
+    let paths: Vec<String> = list.iter().map(|f| f.path.clone()).collect();
+    let mut order = Vec::new();
+    crate::tab::tree_paths(&crate::tab::FileTree::build(&paths), &mut order);
+    order
+        .iter()
+        .filter_map(|p| list.iter().copied().find(|f| &f.path == p))
+        .collect()
 }
 
 fn status_letter(c: &FileChange, staged: bool) -> char {
@@ -477,6 +487,40 @@ impl Tab {
             .iter()
             .filter(|f| f.is_unstaged() && !f.conflicted)
             .collect();
+        if !ctx.egui_wants_keyboard_input()
+            && let Some((path, is_staged)) = self.selected_file.clone()
+        {
+            let (space, down, up) = ctx.input(|i| {
+                (
+                    i.key_pressed(egui::Key::Space),
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::ArrowUp),
+                )
+            });
+            let order = display_order(if is_staged { &staged } else { &unstaged });
+            if let Some(pos) = order.iter().position(|f| f.path == path) {
+                if down && pos + 1 < order.len() {
+                    acts.push(Act::SelectFile(order[pos + 1].clone(), is_staged));
+                }
+                if up && pos > 0 {
+                    acts.push(Act::SelectFile(order[pos - 1].clone(), is_staged));
+                }
+                if space && !busy {
+                    let f = order[pos];
+                    let next = order
+                        .get(pos + 1)
+                        .or_else(|| pos.checked_sub(1).and_then(|p| order.get(p)));
+                    acts.push(Act::Send(if is_staged {
+                        Request::Unstage(f.paths())
+                    } else {
+                        Request::Stage(f.paths())
+                    }));
+                    if let Some(n) = next {
+                        acts.push(Act::SelectFile((*n).clone(), is_staged));
+                    }
+                }
+            }
+        }
         let mut open = self.commit_open;
         let mut close = false;
 
@@ -551,6 +595,20 @@ impl Tab {
                             ("Staged", &staged, true, staged_h),
                         ] {
                             section_header(ui, title, list.len(), |ui| {
+                                if !is_staged
+                                    && ui
+                                        .add_enabled(!list.is_empty() && !busy, small("Stash all"))
+                                        .on_hover_text("Stash all changes…")
+                                        .clicked()
+                                {
+                                    acts.push(Act::Dialog(Dialog::Input {
+                                        title: "Stash changes".into(),
+                                        label: "Message (optional)".into(),
+                                        value: String::new(),
+                                        kind: InputKind::Stash,
+                                        check: Some(("Include untracked files".into(), true)),
+                                    }));
+                                }
                                 let label = if is_staged { "Unstage all" } else { "Stage all" };
                                 if ui.add_enabled(!list.is_empty() && !busy, small(label)).clicked() {
                                     acts.push(Act::Send(if is_staged {
@@ -701,7 +759,11 @@ impl Tab {
                             if busy {
                                 ui.spinner();
                             }
-                            ui.label(RichText::new("Ctrl+Enter").size(11.5).color(text_weak()));
+                            ui.label(
+                                RichText::new("Ctrl+Enter commit · Space stage/unstage · ↑↓ next file")
+                                    .size(11.5)
+                                    .color(text_weak()),
+                            );
                         });
                         if let Some(e) = &self.error {
                             let first: String = e.lines().next().unwrap_or("").chars().take(160).collect();
@@ -874,6 +936,13 @@ fn row_menu(
         } else {
             "Discard changes…"
         };
+        if ui.button("Stash this file").clicked() {
+            ui.close();
+            acts.push(Act::Send(Request::StashFiles {
+                paths: f.paths(),
+                message: String::new(),
+            }));
+        }
         if ui.button(label).clicked() {
             ui.close();
             acts.push(Act::Dialog(Dialog::Confirm {

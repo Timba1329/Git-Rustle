@@ -975,6 +975,15 @@ impl CliBackend {
         Ok(())
     }
 
+    pub fn stash_files(&self, paths: &[String], message: &str) -> Result<()> {
+        let mut args = strs(&["stash", "push", "-u"]);
+        if !message.trim().is_empty() {
+            args.extend(["-m".into(), message.to_string()]);
+        }
+        self.git(&with_paths(args, paths))?;
+        Ok(())
+    }
+
     pub fn stash_apply(&self, index: usize) -> Result<OpResult> {
         let r = self.git(&["stash", "apply", &format!("stash@{{{index}}}")]);
         self.finish(r)

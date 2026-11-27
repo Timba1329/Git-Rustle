@@ -236,6 +236,10 @@ pub enum Request {
         message: String,
         include_untracked: bool,
     },
+    StashFiles {
+        paths: Vec<String>,
+        message: String,
+    },
     StashApply(usize),
     StashPop(usize),
     StashDrop(usize),
@@ -915,6 +919,10 @@ impl State {
                 include_untracked,
             } => {
                 self.be()?.stash_push(&message, include_untracked)?;
+                vec![Response::Info("Changes stashed".into()), snap(self)?]
+            }
+            Request::StashFiles { paths, message } => {
+                self.be()?.stash_files(&paths, &message)?;
                 vec![Response::Info("Changes stashed".into()), snap(self)?]
             }
             Request::StashApply(i) => {

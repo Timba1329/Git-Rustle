@@ -186,6 +186,14 @@ pub struct FileTree {
     pub files: Vec<(String, String)>,
 }
 
+/// All files in display order (folders before files).
+pub fn tree_paths(node: &FileTree, out: &mut Vec<String>) {
+    for child in node.dirs.values() {
+        tree_paths(child, out);
+    }
+    out.extend(node.files.iter().map(|(_, p)| p.clone()));
+}
+
 /// The first file in display order (folders before files).
 pub fn first_in_tree(node: &FileTree) -> Option<String> {
     if let Some((_, c)) = node.dirs.iter().next() {
@@ -256,6 +264,12 @@ pub struct Tab {
     pub commit_files: Vec<CommitFile>,
     pub selected_cfile: Option<String>,
     pub pins: Vec<String>,
+    pub cfile_filter: String,
+    pub cdir_epoch: u32,
+    pub cdir_all: Option<bool>,
+    pub branch_epoch: u32,
+    pub branch_all: Option<bool>,
+    pub branch_filter: String,
     pub msg_prefilled: bool,
     pub push_after: bool,
     pub pins_for: String,
@@ -378,6 +392,12 @@ impl Tab {
             commit_files: Vec::new(),
             selected_cfile: None,
             pins: Vec::new(),
+            cfile_filter: String::new(),
+            cdir_epoch: 0,
+            cdir_all: None,
+            branch_epoch: 0,
+            branch_all: None,
+            branch_filter: String::new(),
             msg_prefilled: false,
             push_after: false,
             pins_for: String::new(),
