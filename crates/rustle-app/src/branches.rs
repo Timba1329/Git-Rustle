@@ -178,6 +178,12 @@ pub fn local_branch_row(
         ) {
             acts.push(Act::Send(Request::FastForward(b.name.clone())));
         }
+        if ctx_item(ui, "Show only this branch in graph", true) {
+            acts.push(Act::GraphOnly(Some(b.name.clone())));
+        }
+        if ctx_item(ui, "Open pull request…", true) {
+            acts.push(Act::Send(Request::PullRequestUrl(b.name.clone())));
+        }
         if ctx_item(ui, "New branch in this folder…", true) {
             let folder = b
                 .name
@@ -194,6 +200,9 @@ pub fn local_branch_row(
         }
         ui.separator();
         if let Some(cur) = current {
+            if ctx_item(ui, &format!("Preview merge into {cur}"), !b.is_head) {
+                acts.push(Act::Send(Request::MergePreview(b.name.clone())));
+            }
             if ctx_item(ui, &format!("Merge into {cur}"), !b.is_head) {
                 acts.push(Act::Send(Request::Merge(b.name.clone())));
             }
@@ -250,6 +259,9 @@ pub fn remote_branch_row(
             acts.push(Act::Send(Request::Checkout(b.clone())));
         }
         if let Some(cur) = current {
+            if ctx_item(ui, &format!("Preview merge into {cur}"), true) {
+                acts.push(Act::Send(Request::MergePreview(b.name.clone())));
+            }
             if ctx_item(ui, &format!("Merge into {cur}"), true) {
                 acts.push(Act::Send(Request::Merge(b.name.clone())));
             }

@@ -938,6 +938,7 @@ impl App {
                     ui.horizontal(|ui| {
                         theme_changed |= ui.radio_value(&mut s.theme, ThemeMode::Dark, "Dark").changed();
                         theme_changed |= ui.radio_value(&mut s.theme, ThemeMode::Light, "Light").changed();
+                        theme_changed |= ui.checkbox(&mut s.follow_system, "Follow Windows").changed();
                     });
                     ui.horizontal(|ui| {
                         ui.label("Text size");
@@ -1231,6 +1232,20 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        if self.settings.follow_system
+            && let Some(t) = ui.ctx().system_theme()
+        {
+            let want = if t == egui::Theme::Dark {
+                ThemeMode::Dark
+            } else {
+                ThemeMode::Light
+            };
+            if want != self.settings.theme {
+                self.settings.theme = want;
+                let ctx = ui.ctx().clone();
+                self.apply_theme(&ctx);
+            }
+        }
         let ctx = ui.ctx().clone();
         let mut app_acts: Vec<AppAct> = Vec::new();
 

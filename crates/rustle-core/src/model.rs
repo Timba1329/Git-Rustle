@@ -238,6 +238,8 @@ pub struct LogQuery {
     pub path: Option<String>,
     /// Only the current branch instead of all branches, remotes and tags.
     pub current_branch_only: bool,
+    /// Only these refs (branch names); empty = no restriction.
+    pub revs: Vec<String>,
 }
 
 impl LogQuery {

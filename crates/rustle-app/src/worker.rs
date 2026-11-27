@@ -240,6 +240,17 @@ pub enum Request {
         paths: Vec<String>,
         message: String,
     },
+    MergedBranches {
+        remote: bool,
+    },
+    DeleteBranches {
+        names: Vec<String>,
+        remote: bool,
+    },
+    MergePreview(String),
+    UndoLast,
+    CheckoutStashed(rustle_core::Branch),
+    PullRequestUrl(String),
     StashApply(usize),
     StashPop(usize),
     StashDrop(usize),
@@ -326,6 +337,16 @@ pub enum Response {
         email: Option<String>,
     },
     Committed,
+    MergedBranches {
+        names: Vec<String>,
+        remote: bool,
+        base: String,
+    },
+    MergePreview {
+        branch: String,
+        conflicts: Vec<String>,
+    },
+    OpenUrl(String),
     Info(String),
     /// Result of a background fetch.
     AutoFetch(Result<(), String>),
@@ -924,6 +945,35 @@ impl State {
             Request::StashFiles { paths, message } => {
                 self.be()?.stash_files(&paths, &message)?;
                 vec![Response::Info("Changes stashed".into()), snap(self)?]
+            }
+            Request::MergedBranches { remote } => {
+                let b = self.be()?;
+                let names = b.merged_branches(remote)?;
+                let base = b.status()?.branch.unwrap_or_else(|| "HEAD".into());
+                vec![Response::MergedBranches { names, remote, base }]
+            }
+            Request::DeleteBranches { names, remote } => {
+                let (ok, failed) = self.be()?.delete_branches(&names, remote);
+                let mut m = format!("Deleted {ok} branch(es)");
+                if !failed.is_empty() {
+                    m.push_str(&format!("; failed: {}", failed.join(", ")));
+                }
+                vec![Response::Info(m), snap(self)?]
+            }
+            Request::MergePreview(branch) => {
+                let conflicts = self.be()?.merge_preview(&branch)?;
+                vec![Response::MergePreview { branch, conflicts }]
+            }
+            Request::UndoLast => {
+                let what = self.be()?.undo_last()?;
+                vec![Response::Info(format!("Undone: {what}")), snap(self)?]
+            }
+            Request::CheckoutStashed(b) => {
+                let r = self.be()?.checkout_stashed(&b)?;
+                vec![msg(r, "Checked out; your changes were re-applied"), snap(self)?]
+            }
+            Request::PullRequestUrl(branch) => {
+                vec![Response::OpenUrl(self.be()?.pull_request_url(&branch)?)]
             }
             Request::StashApply(i) => {
                 let r = self.be()?.stash_apply(i)?;

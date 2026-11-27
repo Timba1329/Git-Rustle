@@ -185,7 +185,9 @@ impl CliBackend {
         if let Some(a) = &q.author {
             args.push(format!("--author={a}"));
         }
-        if q.current_branch_only || q.path.is_some() {
+        if !q.revs.is_empty() && q.path.is_none() {
+            args.extend(q.revs.iter().cloned());
+        } else if q.current_branch_only || q.path.is_some() {
             args.push("HEAD".into());
         } else {
             args.extend(strs(&["--branches", "--remotes", "--tags", "HEAD"]));
@@ -973,6 +975,139 @@ impl CliBackend {
         }
         self.git(&args)?;
         Ok(())
+    }
+
+    /// Branches that are fully merged into HEAD (never the protected ones or the current branch).
+    pub fn merged_branches(&self, remote: bool) -> Result<Vec<String>> {
+        let mut args = strs(&["branch"]);
+        if remote {
+            args.push("-r".into());
+        }
+        args.extend(strs(&["--merged", "HEAD", "--format=%(refname:short)"]));
+        let out = self.git(&args)?;
+        let current = self.status().ok().and_then(|s| s.branch);
+        let upstream = self.status().ok().and_then(|s| s.upstream);
+        let protected = ["main", "master", "develop", "dev", "test", "staging"];
+        Ok(lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .filter(|n| !remote || (n.contains('/') && !n.ends_with("/HEAD")))
+            .filter(|n| {
+                let tail = if remote {
+                    n.split_once('/').map_or(*n, |(_, t)| t)
+                } else {
+                    n
+                };
+                !protected.contains(&tail)
+                    && current.as_deref() != Some(*n)
+                    && upstream.as_deref() != Some(*n)
+            })
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Deletes branches; returns how many succeeded and the failures.
+    pub fn delete_branches(&self, names: &[String], remote: bool) -> (usize, Vec<String>) {
+        let (mut ok, mut failed) = (0, Vec::new());
+        for n in names {
+            let r = if remote {
+                self.delete_remote_branch(n)
+            } else {
+                self.delete_branch(n, false)
+            };
+            match r {
+                Ok(()) => ok += 1,
+                Err(e) => failed.push(format!("{n}: {}", e.friendly().lines().next().unwrap_or(""))),
+            }
+        }
+        (ok, failed)
+    }
+
+    /// Files that would conflict when merging `branch` into HEAD (needs git 2.38+).
+    pub fn merge_preview(&self, branch: &str) -> Result<Vec<String>> {
+        let out = self.runner.run_opts(
+            &[
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "--no-messages",
+                "HEAD",
+                branch,
+            ],
+            Some(&self.repo),
+            &RunOpts {
+                max_ok_exit: Some(1),
+                ..Default::default()
+            },
+        )?;
+        Ok(lossy(&out.stdout)
+            .lines()
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Undoes the last reflog action: switches back after a checkout, otherwise moves the branch
+    /// back (keeping uncommitted changes). Returns a description of what was undone.
+    pub fn undo_last(&self) -> Result<String> {
+        let log = self.reflog(2)?;
+        let Some(last) = log.first() else {
+            return Err(GitError::Parse("nothing to undo".into()));
+        };
+        if last.message.starts_with("checkout:") {
+            self.git(&["checkout", "-"])?;
+        } else if let Some(prev) = log.get(1) {
+            self.git(&["reset", "--keep", &prev.id])?;
+        } else {
+            return Err(GitError::Parse("nothing to undo".into()));
+        }
+        Ok(last.message.clone())
+    }
+
+    /// Stashes local changes, checks out the branch and re-applies the stash.
+    pub fn checkout_stashed(&self, branch: &Branch) -> Result<OpResult> {
+        self.stash_push("Rustle: before checkout", true)?;
+        self.checkout(branch)?;
+        self.stash_pop(0)
+    }
+
+    /// URL that opens a pull/merge request for `branch` on GitHub or GitLab.
+    pub fn pull_request_url(&self, branch: &str) -> Result<String> {
+        let remote = self
+            .git(&["config", "--get", &format!("branch.{branch}.remote")])
+            .ok()
+            .map(|o| lossy(&o.stdout).trim().to_string())
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| "origin".into());
+        let url = lossy(&self.git(&["remote", "get-url", &remote])?.stdout)
+            .trim()
+            .to_string();
+        let path = url
+            .trim_end_matches(".git")
+            .split_once("://")
+            .map_or(url.trim_end_matches(".git"), |(_, r)| r);
+        let (host, repo) = path
+            .rsplit_once(':')
+            .filter(|(h, _)| !h.contains('/'))
+            .map(|(h, r)| (h.rsplit('@').next().unwrap_or(h).to_string(), r.to_string()))
+            .or_else(|| {
+                path.split_once('/')
+                    .map(|(h, r)| (h.rsplit('@').next().unwrap_or(h).to_string(), r.to_string()))
+            })
+            .ok_or_else(|| GitError::Parse(format!("cannot read remote url {url}")))?;
+        if host.contains("github") {
+            Ok(format!("https://{host}/{repo}/compare/{branch}?expand=1"))
+        } else if host.contains("gitlab") {
+            Ok(format!(
+                "https://{host}/{repo}/-/merge_requests/new?merge_request[source_branch]={branch}"
+            ))
+        } else {
+            Err(GitError::Parse(format!(
+                "pull requests are supported for GitHub and GitLab, not {host}"
+            )))
+        }
     }
 
     pub fn stash_files(&self, paths: &[String], message: &str) -> Result<()> {

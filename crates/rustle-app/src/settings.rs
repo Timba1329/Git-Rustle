@@ -14,6 +14,8 @@ pub struct Settings {
     /// Explicit path to `git.exe`; empty = auto-detect.
     pub git_path: String,
     pub theme: ThemeMode,
+    /// Follow the Windows light/dark setting.
+    pub follow_system: bool,
     /// UI scale factor (1.0 = default).
     pub font_scale: f32,
     pub pull_mode: PullMode,
@@ -51,6 +53,7 @@ impl Default for Settings {
         Self {
             git_path: String::new(),
             theme: ThemeMode::Dark,
+            follow_system: false,
             font_scale: 1.0,
             pull_mode: PullMode::FfOnly,
             ignore_whitespace: false,
@@ -133,6 +136,7 @@ impl Settings {
                         ThemeMode::Dark
                     }
                 }
+                "follow_system" => s.follow_system = v == "1",
                 "font_scale" => s.font_scale = v.parse().unwrap_or(1.0f32).clamp(0.7, 1.8),
                 "pull_mode" => {
                     s.pull_mode = match v {
@@ -181,6 +185,7 @@ impl Settings {
             }
             .into(),
         );
+        put("follow_system", if self.follow_system { "1" } else { "0" }.into());
         put("font_scale", self.font_scale.to_string());
         put(
             "pull_mode",

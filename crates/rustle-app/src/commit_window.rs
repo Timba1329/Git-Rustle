@@ -65,6 +65,18 @@ fn change_tree_ui(
     }
 }
 
+/// A ticket key such as `I2C-180` found in a branch name, as a commit message prefix.
+fn ticket_prefix(branch: &str) -> Option<String> {
+    branch.split(['/', '_', ' ']).find_map(|tok| {
+        let (a, b) = tok.split_once('-')?;
+        let digits: String = b.chars().take_while(char::is_ascii_digit).collect();
+        let ok = a.len() >= 2
+            && a.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            && a.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+        (ok && !digits.is_empty()).then(|| format!("{a}-{digits}: "))
+    })
+}
+
 fn display_order<'a>(list: &[&'a FileChange]) -> Vec<&'a FileChange> {
     let paths: Vec<String> = list.iter().map(|f| f.path.clone()).collect();
     let mut order = Vec::new();
@@ -481,6 +493,15 @@ impl Tab {
                 self.message = m;
             }
         }
+        if op == OpState::None && !self.prefix_done && !self.amend {
+            self.prefix_done = true;
+            if self.message.trim().is_empty()
+                && let Some(p) = ticket_prefix(&branch)
+            {
+                self.msg_prefix = p.clone();
+                self.message = p;
+            }
+        }
         let conflicted: Vec<&FileChange> = files.iter().filter(|f| f.conflicted).collect();
         let staged: Vec<&FileChange> = files.iter().filter(|f| f.is_staged()).collect();
         let unstaged: Vec<&FileChange> = files
@@ -671,6 +692,13 @@ impl Tab {
                                 .margin(Margin::symmetric(8, 6)),
                         );
                         let subject_len = self.message.lines().next().unwrap_or("").chars().count();
+                        if self.message.lines().nth(1).is_some_and(|l| !l.trim().is_empty()) {
+                            ui.label(
+                                RichText::new("Leave a blank line after the title.")
+                                    .size(11.5)
+                                    .color(amber()),
+                            );
+                        }
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 8.0;
                             let mut amend = self.amend;
@@ -722,6 +750,7 @@ impl Tab {
                             } else {
                                 let can = (!staged.is_empty() || self.amend)
                                     && !self.message.trim().is_empty()
+                                    && self.message.trim() != self.msg_prefix.trim()
                                     && !busy;
                                 let label = if self.amend {
                                     "Amend commit".to_string()
@@ -990,4 +1019,20 @@ fn row_menu(
             acts.push(Act::App(AppAct::Editor(repo_path.join(&f.path))));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ticket_prefix;
+
+    #[test]
+    fn ticket_prefix_comes_from_the_branch_name() {
+        assert_eq!(ticket_prefix("Tickets/I2C-180").as_deref(), Some("I2C-180: "));
+        assert_eq!(
+            ticket_prefix("feature/HUB-141-abonnementen").as_deref(),
+            Some("HUB-141: ")
+        );
+        assert_eq!(ticket_prefix("main"), None);
+        assert_eq!(ticket_prefix("fix/typo"), None);
+    }
 }

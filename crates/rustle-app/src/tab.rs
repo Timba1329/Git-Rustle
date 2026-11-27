@@ -120,6 +120,7 @@ pub enum Act {
     },
     SelectCommitFile(String),
     TogglePin(String),
+    GraphOnly(Option<String>),
     CommitPush,
     SelectFile(FileChange, bool),
     OpenCommit,
@@ -264,6 +265,10 @@ pub struct Tab {
     pub commit_files: Vec<CommitFile>,
     pub selected_cfile: Option<String>,
     pub pins: Vec<String>,
+    pub graph_refs: Vec<String>,
+    pub last_checkout: Option<rustle_core::Branch>,
+    pub msg_prefix: String,
+    pub prefix_done: bool,
     pub cfile_filter: String,
     pub cdir_epoch: u32,
     pub cdir_all: Option<bool>,
@@ -392,6 +397,10 @@ impl Tab {
             commit_files: Vec::new(),
             selected_cfile: None,
             pins: Vec::new(),
+            graph_refs: Vec::new(),
+            last_checkout: None,
+            msg_prefix: String::new(),
+            prefix_done: false,
             cfile_filter: String::new(),
             cdir_epoch: 0,
             cdir_all: None,
@@ -492,6 +501,7 @@ impl Tab {
             author: opt(&self.author),
             path: self.path_filter.clone(),
             current_branch_only: self.branch_only,
+            revs: self.graph_refs.clone(),
             ..Default::default()
         }
     }
@@ -862,6 +872,58 @@ impl Tab {
                 Response::Blame { path, lines } => self.blame = Some((path, lines)),
                 Response::Reflog(l) => self.reflog = Some(l),
                 Response::Identity { name, email } => self.identity = Some((name, email)),
+                Response::MergedBranches { names, remote, base } => {
+                    if names.is_empty() {
+                        self.info = Some(format!(
+                            "No {}branches are merged into {base}",
+                            if remote { "remote " } else { "" }
+                        ));
+                    } else {
+                        let shown: Vec<&str> = names.iter().take(25).map(String::as_str).collect();
+                        let more = names.len().saturating_sub(25);
+                        let mut text = format!(
+                            "These {} branches are fully merged into {base}:\n\n{}",
+                            names.len(),
+                            shown.join("\n")
+                        );
+                        if more > 0 {
+                            text.push_str(&format!("\n… and {more} more"));
+                        }
+                        if remote {
+                            text.push_str("\n\nThey are deleted on the remote for everyone.");
+                        }
+                        let n = names.len();
+                        self.dialog = Dialog::Confirm {
+                            title: "Delete merged branches".into(),
+                            text,
+                            button: format!("Delete {n}"),
+                            req: Some(Request::DeleteBranches { names, remote }),
+                        };
+                    }
+                }
+                Response::MergePreview { branch, conflicts } => {
+                    let into = self
+                        .repo
+                        .as_ref()
+                        .and_then(|r| r.status.branch.clone())
+                        .unwrap_or_default();
+                    let text = if conflicts.is_empty() {
+                        format!("{branch} merges cleanly into {into}: no conflicts.")
+                    } else {
+                        format!(
+                            "Merging {branch} into {into} conflicts in {} file(s):\n\n{}",
+                            conflicts.len(),
+                            conflicts.join("\n")
+                        )
+                    };
+                    self.dialog = Dialog::Confirm {
+                        title: "Merge preview".into(),
+                        text,
+                        button: "Merge".into(),
+                        req: Some(Request::Merge(branch)),
+                    };
+                }
+                Response::OpenUrl(url) => self.ctx.open_url(egui::OpenUrl::new_tab(url)),
                 Response::Remotes(r) => {
                     self.remote_edit = r.iter().map(|x| x.fetch_url.clone()).collect();
                     self.remotes = Some(r);
@@ -903,6 +965,7 @@ impl Tab {
                 }
                 Response::HookOutput(t) => self.hook_output = Some(t),
                 Response::Committed => {
+                    self.prefix_done = false;
                     if self.push_after {
                         self.push_after = false;
                         let branch = self.repo.as_ref().and_then(|r| r.status.branch.clone());
@@ -927,6 +990,19 @@ impl Tab {
                 }
                 Response::Error(e) => {
                     self.push_after = false;
+                    if let Some(b) = self.last_checkout.take()
+                        && (e.contains("would be overwritten") || e.contains("commit your changes or stash"))
+                    {
+                        self.dialog = Dialog::Confirm {
+                            title: "Local changes in the way".into(),
+                            text: format!(
+                                "Checking out {} would overwrite your local changes.\n\nStash them, switch branch and re-apply them?",
+                                b.name
+                            ),
+                            button: "Stash and check out".into(),
+                            req: Some(Request::CheckoutStashed(b)),
+                        };
+                    }
                     self.error = Some(e);
                     self.info = None;
                 }
@@ -1222,7 +1298,17 @@ impl Tab {
         let mut app = Vec::new();
         for act in acts {
             match act {
-                Act::Send(r) => self.send(r),
+                Act::Send(r) => {
+                    self.last_checkout = match &r {
+                        Request::Checkout(b) => Some(b.clone()),
+                        _ => None,
+                    };
+                    self.send(r);
+                }
+                Act::GraphOnly(name) => {
+                    self.graph_refs = name.into_iter().collect();
+                    self.apply_query();
+                }
                 Act::App(a) => app.push(a),
                 Act::SelectCommit { idx, ctrl, shift } => self.select_commit(idx, ctrl, shift),
                 Act::ClearMulti => self.multi.clear(),
@@ -1676,5 +1762,28 @@ mod tests {
         let ids: Vec<&str> = tab.multi.iter().map(String::as_str).collect();
         assert_eq!(ids, ["c4", "c3"]);
         assert_eq!(tab.multi_sorted().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    fn paths(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn file_tree_lists_folders_before_files() {
+        let tree = FileTree::build(&paths(&["z.txt", "app/b.rs", "app/a.rs", "lang/nl/x.php"]));
+        let mut out = Vec::new();
+        tree_paths(&tree, &mut out);
+        assert_eq!(out, ["app/b.rs", "app/a.rs", "lang/nl/x.php", "z.txt"]);
+        assert_eq!(first_in_tree(&tree).as_deref(), Some("app/b.rs"));
+    }
+
+    #[test]
+    fn first_in_tree_of_nothing_is_none() {
+        assert_eq!(first_in_tree(&FileTree::build(&[])), None);
     }
 }

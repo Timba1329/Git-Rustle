@@ -250,6 +250,33 @@ mod tests {
     }
 
     #[test]
+    fn freed_lanes_are_closed_so_the_graph_stays_narrow() {
+        // Two branches (x, y) fork from r; once both are done only one lane is left,
+        // and a later independent tip must reuse the free lane instead of widening the graph.
+        let g = build_graph(&[
+            c("x", &["r"]),
+            c("y", &["r"]),
+            c("r", &["q"]),
+            c("w", &["q"]),
+            c("q", &[]),
+        ]);
+        assert!(g.width <= 2, "width was {}", g.width);
+        assert!(g.rows.iter().all(|r| r.col < 2));
+    }
+
+    #[test]
+    fn branch_tip_color_follows_its_name() {
+        let mut a = c("a", &[]);
+        a.refs = vec![crate::model::RefLabel {
+            name: "develop".into(),
+            kind: RefKind::Local,
+            is_head: false,
+        }];
+        let g = build_graph(&[a]);
+        assert_eq!(g.rows[0].color, 1);
+    }
+
+    #[test]
     fn merge_uses_two_lanes_and_converges() {
         // m = merge(d, e); d en e hebben beide parent b.
         let g = build_graph(&[c("m", &["d", "e"]), c("d", &["b"]), c("e", &["b"]), c("b", &[])]);

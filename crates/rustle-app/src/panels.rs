@@ -410,6 +410,22 @@ impl Tab {
                             if item(ui, "Reflog…") {
                                 acts.push(Act::ShowReflog);
                             }
+                            if item(ui, "Undo last action…") {
+                                acts.push(Act::Dialog(Dialog::Confirm {
+                                    title: "Undo last action".into(),
+                                    text: "Move the branch back to where it was before the last action \
+                                           (or switch back after a checkout). Uncommitted changes are kept."
+                                        .into(),
+                                    button: "Undo".into(),
+                                    req: Some(Request::UndoLast),
+                                }));
+                            }
+                            if item(ui, "Delete merged branches…") {
+                                acts.push(Act::Send(Request::MergedBranches { remote: false }));
+                            }
+                            if item(ui, "Delete merged remote branches…") {
+                                acts.push(Act::Send(Request::MergedBranches { remote: true }));
+                            }
                             ui.separator();
                             if item(ui, "Repository settings…") {
                                 acts.push(Act::OpenRepoSettings);
@@ -1075,6 +1091,14 @@ impl Tab {
                     }
                     if let Some(p) = self.path_filter.clone() {
                         ui.label(RichText::new(format!("History of {p}")).color(accent()));
+                    }
+                    if !self.graph_refs.is_empty()
+                        && ui
+                            .add(small(&format!("Only {}  ✕", self.graph_refs.join(", "))))
+                            .on_hover_text("Show all branches again")
+                            .clicked()
+                    {
+                        acts.push(Act::GraphOnly(None));
                     }
                     let filtered = self.repo.as_ref().is_some_and(|r| r.query.is_filtered())
                         || self.path_filter.is_some()
