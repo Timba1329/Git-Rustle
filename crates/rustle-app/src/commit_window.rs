@@ -202,12 +202,27 @@ fn file_row(
     (click, resp)
 }
 
-fn section_header(ui: &mut Ui, title: &str, count: usize, add_buttons: impl FnOnce(&mut Ui)) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(title.to_uppercase()).size(10.5).color(text_weak()));
-        ui.label(RichText::new(count.to_string()).size(10.5).color(text_weak()));
-        ui.with_layout(Layout::right_to_left(Align::Center), add_buttons);
-    });
+fn section_header(ui: &mut Ui, title: &str, count: usize, color: Color32, add_buttons: impl FnOnce(&mut Ui)) {
+    Frame::new()
+        .fill(color.gamma_multiply(0.10))
+        .corner_radius(5)
+        .inner_margin(Margin::symmetric(8, 3))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+                ui.painter().circle_filled(dot.center(), 4.0, color);
+                ui.label(bold(title, 12.5));
+                Frame::new()
+                    .fill(color.gamma_multiply(0.22))
+                    .corner_radius(8)
+                    .inner_margin(Margin::symmetric(6, 0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(count.to_string()).size(11.0).color(color));
+                    });
+                ui.with_layout(Layout::right_to_left(Align::Center), add_buttons);
+            });
+        });
 }
 
 fn small(label: &str) -> egui::Button<'_> {
@@ -561,7 +576,7 @@ impl Tab {
                         ui.spacing_mut().item_spacing.y = 3.0;
 
                         if !conflicted.is_empty() {
-                            section_header(ui, "Conflicts", conflicted.len(), |_| {});
+                            section_header(ui, "Conflicts", conflicted.len(), red(), |_| {});
                             for f in &conflicted {
                                 let selected = self.selected_file.as_ref().is_some_and(|(p, _)| *p == f.path);
                                 ui.horizontal(|ui| {
@@ -622,7 +637,8 @@ impl Tab {
                             ("Unstaged", &unstaged, false, unstaged_h),
                             ("Staged", &staged, true, staged_h),
                         ] {
-                            section_header(ui, title, list.len(), |ui| {
+                            let accent_color = if is_staged { green() } else { amber() };
+                            section_header(ui, title, list.len(), accent_color, |ui| {
                                 if !is_staged
                                     && ui
                                         .add_enabled(!list.is_empty() && !busy, small("Stash all"))
@@ -646,48 +662,58 @@ impl Tab {
                                     }));
                                 }
                             });
-                            egui::ScrollArea::vertical()
-                                .id_salt(title)
-                                .auto_shrink([false, false])
-                                .max_height(h.max(30.0))
+                            Frame::new()
+                                .fill(bg_input())
+                                .stroke(Stroke::new(1.0, border()))
+                                .corner_radius(6)
+                                .inner_margin(Margin::same(3))
                                 .show(ui, |ui| {
-                                    ui.spacing_mut().item_spacing.y = 0.0;
-                                    if list.is_empty() {
-                                        ui.label(RichText::new("No files").size(12.5).color(text_weak()));
-                                    }
-                                    let paths: Vec<String> = list.iter().map(|f| f.path.clone()).collect();
-                                    let tree = crate::tab::FileTree::build(&paths);
-                                    let by_path: std::collections::HashMap<&str, &FileChange> =
-                                        list.iter().map(|f| (f.path.as_str(), *f)).collect();
-                                    let selected_file = self.selected_file.clone();
-                                    change_tree_ui(ui, &tree, "", title, &by_path, &mut |ui, f| {
-                                        let selected =
-                                            selected_file.as_ref() == Some(&(f.path.clone(), is_staged));
-                                        let (click, resp) = file_row(
-                                            ui,
-                                            f,
-                                            is_staged,
-                                            selected,
-                                            busy,
-                                            lfs.contains(&f.path),
-                                            stats.get(&(f.path.clone(), is_staged)).copied(),
-                                            true,
-                                        );
-                                        match click {
-                                            RowClick::Select => {
-                                                acts.push(Act::SelectFile(f.clone(), is_staged))
+                                    egui::ScrollArea::vertical()
+                                        .id_salt(title)
+                                        .auto_shrink([false, false])
+                                        .max_height(h.max(30.0))
+                                        .show(ui, |ui| {
+                                            ui.spacing_mut().item_spacing.y = 0.0;
+                                            if list.is_empty() {
+                                                ui.label(
+                                                    RichText::new("No files").size(12.5).color(text_weak()),
+                                                );
                                             }
-                                            RowClick::Toggle => acts.push(Act::Send(if is_staged {
-                                                Request::Unstage(f.paths())
-                                            } else {
-                                                Request::Stage(f.paths())
-                                            })),
-                                            RowClick::None => {}
-                                        }
-                                        row_menu(&resp, f, is_staged, &repo_path, acts, &mut close);
-                                    });
+                                            let paths: Vec<String> =
+                                                list.iter().map(|f| f.path.clone()).collect();
+                                            let tree = crate::tab::FileTree::build(&paths);
+                                            let by_path: std::collections::HashMap<&str, &FileChange> =
+                                                list.iter().map(|f| (f.path.as_str(), *f)).collect();
+                                            let selected_file = self.selected_file.clone();
+                                            change_tree_ui(ui, &tree, "", title, &by_path, &mut |ui, f| {
+                                                let selected = selected_file.as_ref()
+                                                    == Some(&(f.path.clone(), is_staged));
+                                                let (click, resp) = file_row(
+                                                    ui,
+                                                    f,
+                                                    is_staged,
+                                                    selected,
+                                                    busy,
+                                                    lfs.contains(&f.path),
+                                                    stats.get(&(f.path.clone(), is_staged)).copied(),
+                                                    true,
+                                                );
+                                                match click {
+                                                    RowClick::Select => {
+                                                        acts.push(Act::SelectFile(f.clone(), is_staged))
+                                                    }
+                                                    RowClick::Toggle => acts.push(Act::Send(if is_staged {
+                                                        Request::Unstage(f.paths())
+                                                    } else {
+                                                        Request::Stage(f.paths())
+                                                    })),
+                                                    RowClick::None => {}
+                                                }
+                                                row_menu(&resp, f, is_staged, &repo_path, acts, &mut close);
+                                            });
+                                        });
                                 });
-                            ui.add_space(4.0);
+                            ui.add_space(6.0);
                         }
 
                         ui.separator();
@@ -822,7 +848,27 @@ impl Tab {
                                 .or_else(|| self.file_diff.as_ref().map(|d| d.title.clone()))
                                 .unwrap_or_else(|| "No file selected".into());
                             ui.horizontal_wrapped(|ui| {
-                                ui.label(bold(title, 13.0));
+                                let (dir, name) = title
+                                    .rsplit_once('/')
+                                    .map_or((String::new(), title.clone()), |(d, n)| {
+                                        (format!("{d}/"), n.to_string())
+                                    });
+                                if let Some((_, staged)) = &self.selected_file {
+                                    let (txt, c) = if *staged {
+                                        ("STAGED", green())
+                                    } else {
+                                        ("UNSTAGED", amber())
+                                    };
+                                    Frame::new()
+                                        .fill(c.gamma_multiply(0.18))
+                                        .corner_radius(4)
+                                        .inner_margin(Margin::symmetric(6, 1))
+                                        .show(ui, |ui| {
+                                            ui.label(RichText::new(txt).size(10.5).color(c));
+                                        });
+                                }
+                                ui.label(RichText::new(dir).size(12.0).color(text_weak()));
+                                ui.label(bold(name, 13.5));
                                 let mut reload = false;
                                 reload |= ui.checkbox(&mut settings.side_by_side, "Side by side").changed();
                                 reload |= ui
