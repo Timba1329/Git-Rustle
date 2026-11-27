@@ -1585,6 +1585,7 @@ fn commit_row(
     } else {
         Sense::click()
     };
+    let is_head = head_id == Some(c.id.as_str());
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), sense);
     let p = ui.painter_at(rect);
     if state.selected || state.in_multi {
@@ -1594,8 +1595,17 @@ fn commit_row(
             accent().gamma_multiply(if state.in_multi { 0.22 } else { 0.14 }),
         );
         p.rect_filled(Rect::from_min_size(rect.min, vec2(2.0, ROW_H)), 0.0, accent());
+    } else if is_head {
+        p.rect_filled(
+            rect,
+            0.0,
+            green().gamma_multiply(if resp.hovered() { 0.20 } else { 0.12 }),
+        );
     } else if resp.hovered() {
         p.rect_filled(rect, 0.0, bg_btn());
+    }
+    if is_head {
+        p.rect_filled(Rect::from_min_size(rect.min, vec2(3.0, ROW_H)), 0.0, green());
     }
     draw_graph(&p, rect, grow, c.parents.len() > 1, bg_main());
 
