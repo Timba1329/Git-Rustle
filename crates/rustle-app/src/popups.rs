@@ -506,7 +506,7 @@ impl Tab {
                 .default_size([640.0, 320.0])
                 .show(ctx, |ui| {
                     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-                        ui.label(RichText::new(t).monospace().size(12.5));
+                        ui.label(RichText::new(t).monospace().size(12.0));
                     });
                 });
             close_hook = !open;
@@ -525,7 +525,7 @@ impl Tab {
                         ui.ctx().copy_text(t.clone());
                     }
                     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-                        ui.label(RichText::new(t).monospace().size(12.5));
+                        ui.label(RichText::new(t).monospace().size(12.0));
                     });
                 });
             close_details = !open;

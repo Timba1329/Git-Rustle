@@ -2,8 +2,8 @@
 
 use crate::settings::ThemeMode;
 use eframe::egui::{
-    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Rect, Response, RichText,
-    Sense, Stroke, TextStyle, Ui, pos2, vec2,
+    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Rect, Response,
+    RichText, Sense, Stroke, TextStyle, Ui, pos2, vec2,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -71,29 +71,41 @@ const fn c(r: u8, g: u8, b: u8) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
+/// Spacing steps: use these instead of ad-hoc numbers.
+pub const SP_XS: f32 = 4.0;
+pub const SP_S: f32 = 8.0;
+pub const SP_M: f32 = 12.0;
+pub const SP_L: f32 = 16.0;
+
+/// Text scale: hint, small, body, title.
+pub const FS_HINT: f32 = 11.0;
+pub const FS_SMALL: f32 = 12.0;
+pub const FS_BODY: f32 = 13.5;
+pub const FS_TITLE: f32 = 15.0;
+
 pub fn bg_main() -> Color32 {
-    pick(c(0x13, 0x15, 0x1a), c(0xff, 0xff, 0xff))
+    pick(c(0x14, 0x17, 0x1c), c(0xff, 0xff, 0xff))
 }
 pub fn bg_side() -> Color32 {
-    pick(c(0x17, 0x1a, 0x20), c(0xf5, 0xf6, 0xf8))
+    pick(c(0x1a, 0x1e, 0x25), c(0xf5, 0xf6, 0xf8))
 }
 pub fn bg_bar() -> Color32 {
-    pick(c(0x1a, 0x1d, 0x24), c(0xec, 0xef, 0xf3))
+    pick(c(0x1e, 0x22, 0x2a), c(0xec, 0xef, 0xf3))
 }
 pub fn bg_input() -> Color32 {
     pick(c(0x0e, 0x10, 0x14), c(0xff, 0xff, 0xff))
 }
 pub fn bg_btn() -> Color32 {
-    pick(c(0x21, 0x26, 0x2f), c(0xee, 0xf0, 0xf4))
+    pick(c(0x25, 0x2a, 0x34), c(0xee, 0xf0, 0xf4))
 }
 pub fn bg_btn_hover() -> Color32 {
-    pick(c(0x2b, 0x31, 0x3c), c(0xe1, 0xe5, 0xeb))
+    pick(c(0x2f, 0x35, 0x41), c(0xe1, 0xe5, 0xeb))
 }
 pub fn border() -> Color32 {
     if hc() {
         return pick(c(0x8a, 0x93, 0xa6), c(0x55, 0x5d, 0x6e));
     }
-    pick(c(0x28, 0x2d, 0x37), c(0xd9, 0xdd, 0xe4))
+    pick(c(0x2d, 0x33, 0x40), c(0xd9, 0xdd, 0xe4))
 }
 pub fn text() -> Color32 {
     if hc() {
@@ -105,7 +117,7 @@ pub fn text_weak() -> Color32 {
     if hc() {
         return pick(c(0xc4, 0xca, 0xd6), c(0x2c, 0x32, 0x3e));
     }
-    pick(c(0x7d, 0x85, 0x96), c(0x6a, 0x72, 0x83))
+    pick(c(0x8e, 0x96, 0xa8), c(0x6a, 0x72, 0x83))
 }
 pub fn accent() -> Color32 {
     let i = usize::from(ACCENT.load(Ordering::Relaxed));
@@ -347,9 +359,61 @@ pub fn icon_button(ui: &mut Ui, glyph: &str, tip: &str, enabled: bool) -> Respon
 
 /// Small heading in capitals above a list.
 pub fn section_label(ui: &mut Ui, label: &str) {
-    ui.add_space(6.0);
-    ui.label(RichText::new(label.to_uppercase()).size(10.5).color(text_weak()));
-    ui.add_space(1.0);
+    ui.add_space(SP_M);
+    ui.horizontal(|ui| {
+        let (bar, _) = ui.allocate_exact_size(vec2(3.0, 13.0), Sense::hover());
+        ui.painter().rect_filled(bar, 1.5, accent());
+        ui.label(
+            RichText::new(label.to_uppercase())
+                .size(FS_HINT)
+                .color(text_weak()),
+        );
+    });
+    ui.add_space(SP_XS);
+}
+
+/// A boxed group of controls.
+pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    egui::Frame::new()
+        .fill(bg_input())
+        .stroke(Stroke::new(1.0, border()))
+        .corner_radius(6)
+        .inner_margin(Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// A friendly message for an empty list, with an optional hint on what to do.
+pub fn empty_state(ui: &mut Ui, title: &str, hint: &str) {
+    ui.add_space(SP_S);
+    ui.vertical_centered(|ui| {
+        ui.label(RichText::new(title).size(FS_BODY).color(text_weak()));
+        if !hint.is_empty() {
+            ui.label(
+                RichText::new(hint)
+                    .size(FS_SMALL)
+                    .color(text_weak().gamma_multiply(0.8)),
+            );
+        }
+    });
+    ui.add_space(SP_S);
+}
+
+/// A quiet button without a frame, for secondary actions such as "Stage all".
+pub fn text_button(ui: &mut Ui, label: &str, enabled: bool) -> Response {
+    let color = if enabled {
+        accent()
+    } else {
+        text_weak().gamma_multiply(0.5)
+    };
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(RichText::new(label).size(FS_SMALL).color(color)).frame(false),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A sidebar row with an optional coloured dot; returns the click response.
@@ -367,10 +431,13 @@ pub fn nav_row_badges(
 ) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
     let p = ui.painter_at(rect);
+    let fade = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.12);
     if active {
         p.rect_filled(rect, 4.0, accent().gamma_multiply(0.16));
-    } else if resp.hovered() {
-        p.rect_filled(rect, 4.0, bg_btn());
+    } else if fade > 0.0 {
+        p.rect_filled(rect, 4.0, bg_btn().gamma_multiply(fade));
     }
     if let Some(c) = dot {
         p.circle_filled(pos2(rect.left() + 11.0, rect.center().y), 3.0, c);

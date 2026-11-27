@@ -491,7 +491,7 @@ pub fn show(
                             pos2(rect.left() + 10.0, cy),
                             Align2::LEFT_CENTER,
                             label,
-                            FontId::proportional(13.0),
+                            FontId::proportional(13.5),
                             theme::text(),
                         );
                     }

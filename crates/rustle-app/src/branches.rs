@@ -117,7 +117,7 @@ pub fn btree_ui(
 ) {
     for (name, child) in &node.dirs {
         let id = format!("{prefix}{name}/");
-        let r = egui::CollapsingHeader::new(RichText::new(name).size(13.0))
+        let r = egui::CollapsingHeader::new(RichText::new(name).size(13.5))
             .id_salt((&id, open.epoch))
             .default_open(open.open(depth))
             .show(ui, |ui| {
@@ -165,7 +165,7 @@ fn pin_overlay(ui: &mut Ui, row: &egui::Response, pinned: bool, name: &str, acts
         rect.center(),
         Align2::CENTER_CENTER,
         glyph,
-        FontId::proportional(13.0),
+        FontId::proportional(13.5),
         if pinned || r.hovered() {
             accent()
         } else {

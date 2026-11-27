@@ -132,7 +132,7 @@ impl Tab {
                                         ui.spacing_mut().item_spacing.y = 0.0;
                                         ui.label(
                                             RichText::new(format!("{}:{}", h.path, h.line))
-                                                .size(11.5)
+                                                .size(11.0)
                                                 .color(accent()),
                                         );
                                         let t: String = h.text.trim().chars().take(90).collect();
@@ -237,7 +237,7 @@ impl Tab {
             None => v.path.clone(),
         };
         let (rev, path) = (v.rev.clone(), v.path.clone());
-        egui::Window::new(bold(title, 14.0))
+        egui::Window::new(bold(title, 15.0))
             .id(egui::Id::unique("file-viewer"))
             .open(&mut open)
             .default_size([900.0, 620.0])

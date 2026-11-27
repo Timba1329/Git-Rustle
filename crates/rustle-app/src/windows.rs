@@ -54,7 +54,7 @@ fn commit_list(ui: &mut Ui, title: &str, list: &[Commit]) {
                 let short: String = c.id.chars().take(7).collect();
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(short).monospace().size(12.0).color(accent()));
-                    ui.label(RichText::new(&c.subject).size(12.5));
+                    ui.label(RichText::new(&c.subject).size(12.0));
                 })
                 .response
                 .on_hover_text(format!("{} · {}", c.author_name, fmt::date(c.time, true)));
@@ -81,7 +81,7 @@ impl Tab {
         } else {
             format!("Compare {} ↔ {}", v.a, v.b)
         };
-        egui::Window::new(bold(title, 14.0))
+        egui::Window::new(bold(title, 15.0))
             .open(&mut open)
             .default_size([1100.0, 660.0])
             .show(ctx, |ui| {
@@ -96,7 +96,7 @@ impl Tab {
                 let total = v.files.len();
                 let seen = v.files.iter().filter(|f| v.viewed.contains(&f.path)).count();
                 ui.horizontal(|ui| {
-                    ui.label(bold(format!("{seen} of {total} files viewed"), 13.0));
+                    ui.label(bold(format!("{seen} of {total} files viewed"), 13.5));
                     ui.add(egui::ProgressBar::new(seen as f32 / total.max(1) as f32).desired_width(160.0));
                 });
                 ui.separator();
@@ -145,10 +145,10 @@ impl Tab {
                                             }
                                             if let (Some(a), Some(d)) = (f.added, f.deleted) {
                                                 ui.label(
-                                                    RichText::new(format!("+{a}")).color(green()).size(11.5),
+                                                    RichText::new(format!("+{a}")).color(green()).size(11.0),
                                                 );
                                                 ui.label(
-                                                    RichText::new(format!("−{d}")).color(red()).size(11.5),
+                                                    RichText::new(format!("−{d}")).color(red()).size(11.0),
                                                 );
                                             }
                                         });
@@ -191,7 +191,7 @@ impl Tab {
         let Some(list) = &self.backups else { return };
         let busy = self.busy();
         let mut open = true;
-        egui::Window::new(bold("Backups", 14.0))
+        egui::Window::new(bold("Backups", 15.0))
             .open(&mut open)
             .default_size([560.0, 380.0])
             .show(ctx, |ui| {
@@ -251,105 +251,113 @@ impl Tab {
     }
 
     fn dashboard_window(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+        use crate::theme::{FS_TITLE, SP_L, card, section_label};
         let Some(d) = &self.dashboard else { return };
         let mut open = true;
-        egui::Window::new(bold("Repository dashboard", 14.0))
+        egui::Window::new(bold("Repository dashboard", 15.0))
             .open(&mut open)
-            .default_size([620.0, 560.0])
+            .default_size([640.0, 600.0])
+            .vscroll(true)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    for (n, label) in [
-                        (d.commits, "commits"),
-                        (d.branches, "branches"),
-                        (d.tracked_files, "tracked files"),
-                    ] {
-                        ui.label(bold(n.to_string(), 18.0));
-                        ui.label(RichText::new(label).color(text_weak()));
-                        ui.add_space(14.0);
-                    }
-                });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label(bold(
-                        format!("Branches without activity for 30+ days  ({})", d.stale.len()),
-                        13.0,
-                    ));
-                    if ui
-                        .small_button("Delete merged branches…")
-                        .on_hover_text("Review and delete branches that are fully merged")
-                        .clicked()
-                    {
-                        acts.push(Act::Send(Request::MergedBranches { remote: false }));
-                    }
-                });
-                egui::ScrollArea::vertical()
-                    .id_salt("stale")
-                    .max_height(220.0)
-                    .show(ui, |ui| {
-                        if d.stale.is_empty() {
-                            ui.label(RichText::new("None").color(text_weak()));
+                card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (n, label) in [
+                            (d.commits, "commits"),
+                            (d.branches, "branches"),
+                            (d.tracked_files, "tracked files"),
+                        ] {
+                            ui.label(bold(n.to_string(), FS_TITLE));
+                            ui.label(RichText::new(label).color(text_weak()));
+                            ui.add_space(SP_L);
                         }
-                        for b in &d.stale {
-                            ui.horizontal(|ui| {
-                                ui.label(&b.name);
-                                ui.label(RichText::new(fmt::relative(b.unix)).size(12.0).color(text_weak()));
-                                if b.merged {
-                                    ui.label(RichText::new("merged").size(11.5).color(green()));
+                    });
+                });
+                section_label(ui, &format!("No activity for 30+ days  ({})", d.stale.len()));
+                card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if crate::theme::text_button(ui, "Delete merged branches…", true)
+                            .on_hover_text("Review and delete branches that are fully merged")
+                            .clicked()
+                        {
+                            acts.push(Act::Send(Request::MergedBranches { remote: false }));
+                        }
+                    });
+                    egui::ScrollArea::vertical()
+                        .id_salt("stale")
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            if d.stale.is_empty() {
+                                crate::theme::empty_state(ui, "No stale branches", "");
+                            }
+                            for b in &d.stale {
+                                ui.horizontal(|ui| {
+                                    ui.label(&b.name);
+                                    ui.label(
+                                        RichText::new(fmt::relative(b.unix)).size(12.0).color(text_weak()),
+                                    );
+                                    if b.merged {
+                                        ui.label(RichText::new("merged").size(11.0).color(green()));
+                                    } else {
+                                        ui.label(RichText::new("not merged").size(11.0).color(amber()));
+                                    }
+                                });
+                            }
+                        });
+                });
+                section_label(ui, "Commits per week (last 12 weeks)");
+                card(ui, |ui| {
+                    let max = d
+                        .authors
+                        .iter()
+                        .flat_map(|(_, w)| w.iter().copied())
+                        .max()
+                        .unwrap_or(1)
+                        .max(1);
+                    if d.authors.is_empty() {
+                        crate::theme::empty_state(ui, "No commits in the last 12 weeks", "");
+                    }
+                    for (who, weeks) in &d.authors {
+                        ui.horizontal(|ui| {
+                            ui.add_sized([150.0, 16.0], egui::Label::new(who.as_str()).truncate());
+                            let (rect, resp) =
+                                ui.allocate_exact_size(vec2(12.0 * 11.0, 18.0), egui::Sense::hover());
+                            for (i, n) in weeks.iter().enumerate() {
+                                let h = 2.0 + 16.0 * (*n as f32 / max as f32);
+                                let x = rect.left() + i as f32 * 11.0;
+                                let bar = egui::Rect::from_min_max(
+                                    egui::pos2(x, rect.bottom() - h),
+                                    egui::pos2(x + 9.0, rect.bottom()),
+                                );
+                                let c = if *n == 0 {
+                                    text_weak().gamma_multiply(0.4)
                                 } else {
-                                    ui.label(RichText::new("not merged").size(11.5).color(amber()));
-                                }
-                            });
-                        }
-                    });
-                ui.separator();
-                ui.label(bold("Commits per week (last 12 weeks)", 13.0));
-                let max = d
-                    .authors
-                    .iter()
-                    .flat_map(|(_, w)| w.iter().copied())
-                    .max()
-                    .unwrap_or(1)
-                    .max(1);
-                for (who, weeks) in &d.authors {
-                    ui.horizontal(|ui| {
-                        ui.add_sized([150.0, 16.0], egui::Label::new(who.as_str()).truncate());
-                        let (rect, resp) =
-                            ui.allocate_exact_size(vec2(12.0 * 11.0, 18.0), egui::Sense::hover());
-                        for (i, n) in weeks.iter().enumerate() {
-                            let h = 2.0 + 16.0 * (*n as f32 / max as f32);
-                            let x = rect.left() + i as f32 * 11.0;
-                            let bar = egui::Rect::from_min_max(
-                                egui::pos2(x, rect.bottom() - h),
-                                egui::pos2(x + 9.0, rect.bottom()),
+                                    accent()
+                                };
+                                ui.painter().rect_filled(bar, 2.0, c);
+                            }
+                            resp.on_hover_text(format!("{} commits in 12 weeks", weeks.iter().sum::<u32>()));
+                            ui.label(
+                                RichText::new(weeks.iter().sum::<u32>().to_string())
+                                    .size(12.0)
+                                    .color(text_weak()),
                             );
-                            let c = if *n == 0 {
-                                text_weak().gamma_multiply(0.4)
-                            } else {
-                                accent()
-                            };
-                            ui.painter().rect_filled(bar, 2.0, c);
-                        }
-                        resp.on_hover_text(format!("{} commits in 12 weeks", weeks.iter().sum::<u32>()));
-                        ui.label(
-                            RichText::new(weeks.iter().sum::<u32>().to_string())
-                                .size(12.0)
-                                .color(text_weak()),
-                        );
-                    });
-                }
-                ui.separator();
-                ui.label(bold("Largest files", 13.0));
-                for (path, size) in &d.big_files {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(size_text(*size))
-                                .monospace()
-                                .size(12.0)
-                                .color(accent()),
-                        );
-                        ui.label(path);
-                    });
-                }
+                        });
+                    }
+                });
+                section_label(ui, "Largest files");
+                card(ui, |ui| {
+                    for (path, size) in &d.big_files {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(size_text(*size))
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(accent()),
+                            );
+                            ui.label(path);
+                        });
+                    }
+                });
             });
         if !open {
             self.dashboard = None;
@@ -375,7 +383,7 @@ impl Tab {
         hooks.sort();
         let mut open = true;
         let mut rename: Option<(String, String)> = None;
-        egui::Window::new(bold("Git hooks", 14.0))
+        egui::Window::new(bold("Git hooks", 15.0))
             .open(&mut open)
             .default_size([460.0, 320.0])
             .show(ctx, |ui| {
@@ -421,7 +429,7 @@ impl Tab {
             return;
         };
         let busy = self.busy();
-        egui::Window::new(bold("Bisect", 14.0))
+        egui::Window::new(bold("Bisect", 15.0))
             .anchor(Align2::RIGHT_TOP, vec2(-16.0, 70.0))
             .collapsible(false)
             .resizable(false)
@@ -452,7 +460,7 @@ impl Tab {
         };
         let index = *index;
         let mut open = true;
-        egui::Window::new(bold(format!("Stash preview — stash@{{{index}}}"), 14.0))
+        egui::Window::new(bold(format!("Stash preview — stash@{{{index}}}"), 15.0))
             .open(&mut open)
             .default_size([860.0, 560.0])
             .show(ctx, |ui| {
@@ -486,13 +494,26 @@ impl Tab {
             return;
         }
         let first: String = text.lines().next().unwrap_or("").chars().take(140).collect();
+        let (icon, color) = if text.starts_with('⚠') {
+            ("✕", red())
+        } else if text.contains("conflict") || text.contains("not in the loaded") {
+            ("!", amber())
+        } else {
+            ("✓", green())
+        };
+        let first = first.trim_start_matches('⚠').trim().to_string();
         egui::Area::new(egui::Id::unique("toast"))
-            .anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -16.0))
+            .anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -40.0))
             .interactable(false)
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.label(first);
-                });
+                egui::Frame::popup(ui.style())
+                    .stroke(egui::Stroke::new(1.5, color))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(icon).strong().color(color));
+                            ui.label(first);
+                        });
+                    });
             });
         ctx.request_repaint_after(Duration::from_millis(500));
     }

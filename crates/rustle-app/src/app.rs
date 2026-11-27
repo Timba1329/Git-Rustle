@@ -456,7 +456,7 @@ impl App {
                             RichText::new(
                                 "Rustle downloads the new version, checks its checksum, replaces itself and restarts.",
                             )
-                            .size(12.5)
+                            .size(12.0)
                             .color(text_weak()),
                         );
                         ui.add_space(8.0);
@@ -477,7 +477,7 @@ impl App {
                         ui.add_space(6.0);
                         ui.add(egui::ProgressBar::new(*p).show_percentage());
                         ui.add_space(4.0);
-                        ui.label(RichText::new("Rustle restarts when the update is installed.").size(12.5).color(text_weak()));
+                        ui.label(RichText::new("Rustle restarts when the update is installed.").size(12.0).color(text_weak()));
                     }
                     UpdateState::Failed(r, e) => {
                         ui.colored_label(red(), format!("The update failed: {e}"));
@@ -908,7 +908,7 @@ impl App {
                                         pos2(rect.right() - 8.0, rect.center().y),
                                         Align2::RIGHT_CENTER,
                                         &en.hint,
-                                        FontId::proportional(11.5),
+                                        FontId::proportional(11.0),
                                         text_weak(),
                                     );
                                 }
@@ -1225,6 +1225,81 @@ impl App {
         }
     }
 
+    /// A thin animated line under the tabs while something is running.
+    fn busy_line(&mut self, ui: &mut Ui) {
+        if !self.tabs.iter().any(Tab::busy) {
+            return;
+        }
+        let top = ui.max_rect();
+        let w = top.width();
+        let t = ui.input(|i| i.time) as f32;
+        let x = ((t * 0.9) % 1.25 - 0.25) * w;
+        let bar = Rect::from_min_max(
+            pos2(top.left() + x.max(0.0), top.top()),
+            pos2((top.left() + x + w * 0.25).min(top.right()), top.top() + 2.0),
+        );
+        if bar.width() > 0.0 {
+            ui.painter().rect_filled(bar, 1.0, crate::theme::accent());
+        }
+        ui.ctx().request_repaint();
+    }
+
+    /// Branch, sync state, changes, last fetch and a breadcrumb of the current selection.
+    fn status_bar(&mut self, ui: &mut Ui) {
+        use crate::theme::{accent, amber, bg_side, green, text_weak};
+        let tab = &self.tabs[self.active];
+        let Some(r) = &tab.repo else { return };
+        let branch = r.status.branch.clone().unwrap_or_else(|| "detached HEAD".into());
+        let mut crumbs = vec![crate::panels::folder_name(&r.path), branch];
+        if let Some(id) = &tab.selected_id {
+            crumbs.push(id.chars().take(7).collect());
+        }
+        if let Some(p) = tab.selected_cfile.as_ref().filter(|p| !p.is_empty()) {
+            crumbs.push(p.clone());
+        }
+        let changes = r.status.files.len();
+        let (ahead, behind) = (r.status.ahead, r.status.behind);
+        let mins = tab.last_fetch.elapsed().as_secs() / 60;
+        let busy = tab.busy();
+        let frame = Frame::new()
+            .fill(bg_side())
+            .inner_margin(Margin::symmetric(10, 3));
+        egui::Panel::bottom("statusbar")
+            .frame(frame)
+            .show_separator_line(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    ui.label(RichText::new(crumbs.join("  ›  ")).size(12.0).color(text_weak()));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if busy {
+                            ui.spinner();
+                            ui.label(RichText::new("Working…").size(12.0).color(accent()));
+                        }
+                        let fetched = if mins == 0 {
+                            "Fetched just now".to_string()
+                        } else {
+                            format!("Fetched {mins} min ago")
+                        };
+                        ui.label(RichText::new(fetched).size(12.0).color(text_weak()));
+                        if changes > 0 {
+                            ui.label(
+                                RichText::new(format!("● {changes} changes"))
+                                    .size(12.0)
+                                    .color(amber()),
+                            );
+                        }
+                        if behind > 0 {
+                            ui.label(RichText::new(format!("↓ {behind}")).size(12.0).color(amber()));
+                        }
+                        if ahead > 0 {
+                            ui.label(RichText::new(format!("↑ {ahead}")).size(12.0).color(green()));
+                        }
+                    });
+                });
+            });
+    }
+
     fn tab_bar(&mut self, ui: &mut Ui, acts: &mut Vec<AppAct>) {
         let frame = Frame::new().fill(bg_side()).inner_margin(Margin {
             left: 8,
@@ -1261,7 +1336,7 @@ impl App {
                         let color = if selected { text() } else { text_weak() };
                         let galley = ui
                             .painter()
-                            .layout_no_wrap(label, FontId::proportional(13.0), color);
+                            .layout_no_wrap(label, FontId::proportional(13.5), color);
                         let w = (galley.size().x + 16.0 + 26.0).max(100.0);
                         let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
                         let hovered = resp.hovered();
@@ -1358,6 +1433,8 @@ impl App {
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
+                .vscroll(true)
+                .max_height((ctx.content_rect().height() - 80.0).max(300.0))
                 .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
                 .show(ctx, |ui| {
                     ui.set_min_width(460.0);
@@ -1493,7 +1570,7 @@ impl App {
                             ui.spinner();
                         }
                         if let Some(n) = &self.update_note {
-                            ui.label(RichText::new(n).size(12.5).color(text_weak()));
+                            ui.label(RichText::new(n).size(12.0).color(text_weak()));
                         }
                     });
                     ui.horizontal(|ui| {
@@ -1788,6 +1865,8 @@ impl eframe::App for App {
 
         self.menu_bar(ui, &mut app_acts);
         self.tab_bar(ui, &mut app_acts);
+        self.busy_line(ui);
+        self.status_bar(ui);
 
         let mut acts: Vec<Act> = Vec::new();
         let recent: Vec<PathBuf> = self.recent.paths().to_vec();

@@ -208,7 +208,7 @@ pub fn show(ui: &mut Ui, v: &mut ImageDiffView) {
                             body.center(),
                             Align2::CENTER_CENTER,
                             "none",
-                            FontId::proportional(13.0),
+                            FontId::proportional(13.5),
                             text_weak(),
                         );
                     }
@@ -266,7 +266,7 @@ pub fn show(ui: &mut Ui, v: &mut ImageDiffView) {
             rect.center(),
             Align2::CENTER_CENTER,
             "No image data",
-            FontId::proportional(14.0),
+            FontId::proportional(13.5),
             text(),
         );
     }

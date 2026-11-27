@@ -85,7 +85,7 @@ pub fn status_icon(p: &egui::Painter, center: egui::Pos2, letter: char) {
             center,
             Align2::CENTER_CENTER,
             glyph,
-            FontId::proportional(13.0),
+            FontId::proportional(13.5),
             color,
         );
     } else {
@@ -217,7 +217,7 @@ fn tool_btn(
 }
 
 fn small(label: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(label).size(12.5))
+    egui::Button::new(RichText::new(label).size(12.0))
 }
 
 /// "Find in diff" box with previous/next; returns the lowercase needle, the row of the current match
@@ -299,7 +299,7 @@ impl Tab {
                         .as_ref()
                         .map_or_else(|| "No repository".to_string(), |p| folder_name(p));
                     ghost(ui, |ui| {
-                        ui.menu_button(bold(format!("{repo_name} ▾"), 14.0), |ui| {
+                        ui.menu_button(bold(format!("{repo_name} ▾"), 13.5), |ui| {
                             ui.set_min_width(300.0);
                             section_label(ui, "Recent repositories");
                             if recent.is_empty() {
@@ -696,7 +696,7 @@ impl Tab {
                 }
                 let Some(r) = &self.repo else { return };
                 let current = r.status.branch.clone();
-                let heading = |text: String| RichText::new(text).size(10.5).color(text_weak());
+                let heading = |text: String| RichText::new(text).size(11.0).color(text_weak());
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(heading("BRANCHES".into()));
@@ -1162,13 +1162,6 @@ impl Tab {
                         te.request_focus();
                     }
                     let mut apply = enter(&te, ui);
-                    let ae = ui.add(
-                        egui::TextEdit::singleline(&mut self.author)
-                            .hint_text("Author")
-                            .desired_width(120.0)
-                            .margin(Margin::symmetric(6, 3)),
-                    );
-                    apply |= enter(&ae, ui);
                     let authors: Vec<String> = self.repo.as_ref().map_or_else(Vec::new, |r| {
                         let mut v: Vec<String> = r.commits.iter().map(|c| c.author_name.clone()).collect();
                         v.sort();
@@ -1176,34 +1169,59 @@ impl Tab {
                         v.truncate(40);
                         v
                     });
-                    ui.menu_button("▾", |ui| {
-                        for a in &authors {
-                            if ui.button(a).clicked() {
-                                self.author.clone_from(a);
-                                apply = true;
-                                ui.close();
+                    let extra_active = !self.author.is_empty()
+                        || !self.since.is_empty()
+                        || !self.until.is_empty()
+                        || !self.pickaxe.is_empty();
+                    ui.menu_button(
+                        if extra_active {
+                            "Filters ●"
+                        } else {
+                            "Filters ▾"
+                        },
+                        |ui| {
+                            ui.set_min_width(280.0);
+                            ui.label(
+                                RichText::new("Press Enter to apply")
+                                    .size(11.0)
+                                    .color(text_weak()),
+                            );
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                let ae = ui.add(
+                                    egui::TextEdit::singleline(&mut self.author)
+                                        .hint_text("Author")
+                                        .desired_width(210.0)
+                                        .margin(Margin::symmetric(6, 3)),
+                                );
+                                apply |= enter(&ae, ui);
+                                ui.menu_button("▾", |ui| {
+                                    for a in &authors {
+                                        if ui.button(a).clicked() {
+                                            self.author.clone_from(a);
+                                            apply = true;
+                                            ui.close();
+                                        }
+                                    }
+                                })
+                                .response
+                                .on_hover_text("Pick an author");
+                            });
+                            for (value, hint) in [
+                                (&mut self.since, "From date (2026-11-01)"),
+                                (&mut self.until, "Until date"),
+                                (&mut self.pickaxe, "Find in code changes"),
+                            ] {
+                                let r = ui.add(
+                                    egui::TextEdit::singleline(value)
+                                        .hint_text(hint)
+                                        .desired_width(f32::INFINITY)
+                                        .margin(Margin::symmetric(6, 3)),
+                                );
+                                apply |= enter(&r, ui);
                             }
-                        }
-                    })
-                    .response
-                    .on_hover_text("Pick an author");
-                    for (value, hint) in [(&mut self.since, "From (2026-11-01)"), (&mut self.until, "Until")]
-                    {
-                        let r = ui.add(
-                            egui::TextEdit::singleline(value)
-                                .hint_text(hint)
-                                .desired_width(104.0)
-                                .margin(Margin::symmetric(6, 3)),
-                        );
-                        apply |= enter(&r, ui);
-                    }
-                    let pe = ui.add(
-                        egui::TextEdit::singleline(&mut self.pickaxe)
-                            .hint_text("Find in code changes")
-                            .desired_width(150.0)
-                            .margin(Margin::symmetric(6, 3)),
+                        },
                     );
-                    apply |= enter(&pe, ui);
                     if ui
                         .checkbox(&mut self.branch_only, "Current branch only")
                         .changed()
@@ -1319,7 +1337,7 @@ impl Tab {
             .resizable(true)
             .default_size(220.0)
             .show(ui, |ui| {
-                ui.label(bold(format!("{n} commits selected"), 14.5));
+                ui.label(bold(format!("{n} commits selected"), 15.0));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     let tip = squash.as_ref().err().cloned().unwrap_or_default();
@@ -1361,7 +1379,7 @@ impl Tab {
                 ui.add_space(4.0);
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     for s in &sorted {
-                        ui.label(RichText::new(s).size(12.5));
+                        ui.label(RichText::new(s).size(12.0));
                     }
                 });
             });
@@ -1390,7 +1408,7 @@ impl Tab {
                 if let Some(c) = &commit {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     ui.horizontal(|ui| {
-                        ui.label(bold(&c.subject, 14.5));
+                        ui.label(bold(&c.subject, 15.0));
                         if !settings.ticket_url.is_empty()
                             && let Some(key) = crate::commit_window::ticket_key(&c.subject)
                         {
@@ -1476,7 +1494,7 @@ impl Tab {
                         .id_salt("body")
                         .max_height(64.0)
                         .show(ui, |ui| {
-                            ui.label(RichText::new(&self.commit_body).size(12.5));
+                            ui.label(RichText::new(&self.commit_body).size(12.0));
                         });
                 }
                 ui.add_space(4.0);
@@ -1664,7 +1682,7 @@ fn all_rows(ui: &mut Ui, n: usize, a: u32, d: u32, selected: bool) -> egui::Resp
         pos2(rect.left() + 6.0, cy),
         Align2::LEFT_CENTER,
         format!("All files ({n})"),
-        FontId::proportional(13.0),
+        FontId::proportional(13.5),
         text(),
     );
     paint_counts(&p, rect, Some(a), Some(d));
@@ -1717,7 +1735,7 @@ fn commit_tree_ui(
             cur = format!("{cur}/{n}");
             c = ch;
         }
-        egui::CollapsingHeader::new(RichText::new(label).size(13.0))
+        egui::CollapsingHeader::new(RichText::new(label).size(13.5))
             .id_salt(("cdir", &cur, open.epoch))
             .default_open(open.open(1))
             .show(ui, |ui| {
@@ -1782,7 +1800,7 @@ fn commit_file_row(ui: &mut Ui, f: &CommitFile, selected: bool, name_only: Optio
     };
     paint_counts(&p, rect, f.added, f.deleted);
     let tp = p.with_clip_rect(rect.with_max_x(rect.right() - 70.0));
-    let g = tp.layout_no_wrap(name.to_string(), FontId::proportional(13.0), text());
+    let g = tp.layout_no_wrap(name.to_string(), FontId::proportional(13.5), text());
     let x = rect.left() + 34.0;
     let w = g.size().x;
     tp.galley(pos2(x, cy - g.size().y / 2.0), g, text());
@@ -1791,7 +1809,7 @@ fn commit_file_row(ui: &mut Ui, f: &CommitFile, selected: bool, name_only: Optio
             pos2(x + w + 6.0, cy),
             Align2::LEFT_CENTER,
             dir,
-            FontId::proportional(11.5),
+            FontId::proportional(11.0),
             text_weak(),
         );
     }
@@ -1864,7 +1882,7 @@ fn wip_row(ui: &mut Ui, r: &RepoData, graph_w: f32, grow: &GraphRow, acts: &mut 
         if n == 0 {
             continue;
         }
-        let g = p.layout_no_wrap(format!("{n} {label}"), FontId::proportional(11.5), color);
+        let g = p.layout_no_wrap(format!("{n} {label}"), FontId::proportional(11.0), color);
         let size = g.size() + vec2(10.0, 3.0);
         let br = Rect::from_min_size(pos2(x, cy - size.y / 2.0), size);
         p.rect_filled(br, 3.0, color.gamma_multiply(0.15));
@@ -1952,7 +1970,7 @@ fn commit_row(
             (RefKind::Remote, _) => purple(),
             (RefKind::Tag, _) => amber(),
         };
-        let galley = tp.layout_no_wrap(l.name.clone(), FontId::proportional(11.5), color);
+        let galley = tp.layout_no_wrap(l.name.clone(), FontId::proportional(11.0), color);
         let size = galley.size() + vec2(10.0, 3.0);
         let br = Rect::from_min_size(pos2(x, cy - size.y / 2.0), size);
         tp.rect_filled(br, 3.0, color.gamma_multiply(0.15));
@@ -1990,7 +2008,7 @@ fn commit_row(
             pos2(author_left, cy),
             Align2::LEFT_CENTER,
             &c.author_name,
-            FontId::proportional(12.5),
+            FontId::proportional(12.0),
             text_weak(),
         );
     }

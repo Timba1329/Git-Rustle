@@ -126,7 +126,7 @@ impl Tab {
                         Some(rows) => {
                             egui::Grid::new("config-grid").num_columns(4).spacing([10.0, 6.0]).show(ui, |ui| {
                                 for (i, row) in rows.iter().enumerate() {
-                                    ui.label(RichText::new(row.key).monospace().size(12.5));
+                                    ui.label(RichText::new(row.key).monospace().size(12.0));
                                     ui.add_sized(
                                         [210.0, 24.0],
                                         egui::TextEdit::singleline(&mut self.config_edit[i])

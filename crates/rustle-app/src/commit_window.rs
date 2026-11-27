@@ -51,7 +51,7 @@ fn change_tree_ui(
             cur = format!("{cur}/{n}");
             c = ch;
         }
-        egui::CollapsingHeader::new(RichText::new(label).size(13.0))
+        egui::CollapsingHeader::new(RichText::new(label).size(13.5))
             .id_salt((salt, "cwdir", &cur))
             .default_open(true)
             .show(ui, |ui| {
@@ -180,7 +180,7 @@ fn file_row(
         );
     }
     if is_lfs {
-        let g = p.layout_no_wrap("LFS".into(), FontId::proportional(10.5), purple());
+        let g = p.layout_no_wrap("LFS".into(), FontId::proportional(11.0), purple());
         let size = g.size() + vec2(8.0, 2.0);
         let br = Rect::from_min_size(pos2(rect.right() - 62.0 + 6.0, cy - size.y / 2.0), size);
         p.rect_filled(br, 3.0, purple().gamma_multiply(0.18));
@@ -191,16 +191,18 @@ fn file_row(
     let id = ui.scope_id().with(("toggle", &f.path, is_staged));
     let br = ui.interact(btn, id, Sense::click());
     let hovered = br.hovered() && !busy;
-    if hovered {
-        p.rect_filled(btn, 4.0, bg_btn_hover());
+    if resp.hovered() || selected || br.hovered() {
+        if hovered {
+            p.rect_filled(btn, 4.0, bg_btn_hover());
+        }
+        p.text(
+            btn.center(),
+            Align2::CENTER_CENTER,
+            if is_staged { "−" } else { "+" },
+            FontId::proportional(16.0),
+            if hovered { text() } else { text_weak() },
+        );
     }
-    p.text(
-        btn.center(),
-        Align2::CENTER_CENTER,
-        if is_staged { "−" } else { "+" },
-        FontId::proportional(16.0),
-        if hovered { text() } else { text_weak() },
-    );
     let toggled = br.clicked() && !busy;
     br.on_hover_text(if is_staged { "Unstage" } else { "Stage" });
     let click = if toggled {
@@ -223,7 +225,7 @@ fn section_header(ui: &mut Ui, title: &str, count: usize, color: Color32, add_bu
             ui.horizontal(|ui| {
                 let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
                 ui.painter().circle_filled(dot.center(), 4.0, color);
-                ui.label(bold(title, 12.5));
+                ui.label(bold(title, 12.0));
                 Frame::new()
                     .fill(color.gamma_multiply(0.22))
                     .corner_radius(8)
@@ -361,7 +363,7 @@ fn conflict_editor_ui(ui: &mut Ui, e: &mut ConflictEditor, busy: bool, acts: &mu
                             "unresolved"
                         };
                         let mut title =
-                            RichText::new(format!("Conflict {} of {total}  ·  {state}", k + 1)).size(13.0);
+                            RichText::new(format!("Conflict {} of {total}  ·  {state}", k + 1)).size(13.5);
                         title = if e.choices[k].is_some() {
                             title.color(green())
                         } else if focused {
@@ -571,7 +573,7 @@ impl Tab {
         let mut open = self.commit_open;
         let mut close = false;
 
-        egui::Window::new(bold(format!("Commit to {branch}"), 14.0))
+        egui::Window::new(bold(format!("Commit to {branch}"), 15.0))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -651,8 +653,7 @@ impl Tab {
                             let accent_color = if is_staged { green() } else { amber() };
                             section_header(ui, title, list.len(), accent_color, |ui| {
                                 if !is_staged
-                                    && ui
-                                        .add_enabled(!list.is_empty() && !busy, small("Stash all"))
+                                    && crate::theme::text_button(ui, "Stash all", !list.is_empty() && !busy)
                                         .on_hover_text("Stash all changes…")
                                         .clicked()
                                 {
@@ -665,7 +666,7 @@ impl Tab {
                                     }));
                                 }
                                 let label = if is_staged { "Unstage all" } else { "Stage all" };
-                                if ui.add_enabled(!list.is_empty() && !busy, small(label)).clicked() {
+                                if crate::theme::text_button(ui, label, !list.is_empty() && !busy).clicked() {
                                     acts.push(Act::Send(if is_staged {
                                         Request::Unstage(vec![])
                                     } else {
@@ -686,8 +687,18 @@ impl Tab {
                                         .show(ui, |ui| {
                                             ui.spacing_mut().item_spacing.y = 0.0;
                                             if list.is_empty() {
-                                                ui.label(
-                                                    RichText::new("No files").size(12.5).color(text_weak()),
+                                                crate::theme::empty_state(
+                                                    ui,
+                                                    if is_staged {
+                                                        "Nothing staged yet"
+                                                    } else {
+                                                        "No unstaged changes"
+                                                    },
+                                                    if is_staged {
+                                                        "Press Space on a file, or use +"
+                                                    } else {
+                                                        ""
+                                                    },
                                                 );
                                             }
                                             let paths: Vec<String> =
@@ -739,7 +750,7 @@ impl Tab {
                         if self.message.lines().nth(1).is_some_and(|l| !l.trim().is_empty()) {
                             ui.label(
                                 RichText::new("Leave a blank line after the title.")
-                                    .size(11.5)
+                                    .size(11.0)
                                     .color(amber()),
                             );
                         }
@@ -836,7 +847,7 @@ impl Tab {
                         ui.add(
                             egui::Label::new(
                                 RichText::new("Ctrl+Enter commit · Space stage/unstage · ↑↓ next file")
-                                    .size(11.5)
+                                    .size(11.0)
                                     .color(text_weak()),
                             )
                             .wrap(),
@@ -878,7 +889,7 @@ impl Tab {
                                         .corner_radius(4)
                                         .inner_margin(Margin::symmetric(6, 1))
                                         .show(ui, |ui| {
-                                            ui.label(RichText::new(txt).size(10.5).color(c));
+                                            ui.label(RichText::new(txt).size(11.0).color(c));
                                         });
                                 }
                                 ui.label(RichText::new(dir).size(12.0).color(text_weak()));
@@ -935,7 +946,7 @@ impl Tab {
                 .into_iter()
                 .enumerate()
                 {
-                    c[i].label(RichText::new(title).size(11.5).color(text_weak()));
+                    c[i].label(RichText::new(title).size(11.0).color(text_weak()));
                     egui::ScrollArea::both()
                         .id_salt(("conflict", i))
                         .auto_shrink(false)
